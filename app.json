@@ -1,0 +1,58 @@
+{
+  "expo": {
+    "name": "Ente Photo",
+    "slug": "entephoto-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "entephoto",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#0B0F1A",
+    "androidStatusBar": {
+      "backgroundColor": "#0B0F1A",
+      "barStyle": "light-content"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.entephoto.app"
+    },
+    "android": {
+      "package": "com.entephoto.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0F1A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-secure-store",
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0B0F1A",
+          "resizeMode": "contain"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1b9eeb0d-863c-4c65-a050-2c11a87f3b88"
+      }
+    },
+    "owner": "mizhabdev",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/1b9eeb0d-863c-4c65-a050-2c11a87f3b88"
+    }
+  }
+}

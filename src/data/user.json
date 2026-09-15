@@ -1,0 +1,19 @@
+{
+  "_id": {
+    "$oid": "6a3da23444d7dc88926c15a3"
+  },
+  "name": "Mohammed Mizhab C.H",
+  "email": "mohammedmizhabk@gmail.com",
+  "provider": "google",
+  "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocLn2ZWhsZU1Jjh4ewpdIgzci8IAHE1hDqKlASjWsy4yuOBiJb4=s192-c-mo",
+  "isBlocked": false,
+  "specializations": [],
+  "role": "photographer",
+  "createdAt": {
+    "$date": "2026-06-25T21:48:36.231Z"
+  },
+  "updatedAt": {
+    "$date": "2026-06-25T21:48:36.231Z"
+  },
+  "phoneNumber": "6549431646"
+}
