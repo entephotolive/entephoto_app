@@ -8,15 +8,14 @@ import {
   TouchableOpacity,
   FlatList,
   Platform,
-  StatusBar,
   Pressable,
   ActivityIndicator,
   Modal,
   Alert,
+  Animated,
 } from 'react-native';
-import Svg, { Path, Polygon, Defs, RadialGradient, Stop, Circle } from 'react-native-svg';
+import Svg, { Path } from 'react-native-svg';
 import {
-  ArrowLeft,
   Search,
   SlidersHorizontal,
   Calendar,
@@ -26,7 +25,6 @@ import {
   ArrowRight,
   Smartphone,
   Inbox,
-  User as UserIcon,
   Mail,
   Phone,
   LogOut,
@@ -40,9 +38,8 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { AppNavigationProp } from '@/navigation/types';
 import { Text } from '@/components/Text';
-import { IconButton } from '@/components/IconButton';
-import { COLORS, RADII, SPACING, useTheme } from '@/constants/theme';
-import { TYPOGRAPHY, FONTS } from '@/constants/typography';
+import { COLORS, SPACING, useTheme } from '@/constants/theme';
+import { FONTS } from '@/constants/typography';
 import { useEvents, EventModel } from '@/hooks/useEvents';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useAuthStore } from '@/store/authStore';
@@ -120,31 +117,157 @@ const getSubtitleFromTitle = (title: string, category?: string): string => {
 
 export const SelectEventScreen: React.FC = () => {
   const navigation = useNavigation<AppNavigationProp>();
-  const { colors, isDark, toggleTheme } = useTheme();
+  const { isDark, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
   const logout = useAuthStore(state => state.logout);
 
-  // Data Hooks
-  const { data: events, isLoading: isEventsLoading } = useEvents();
+  // Data Hooks - Connected to real backend API (/mobile/events/)
+  const {
+    data: events,
+    isLoading: isEventsLoading,
+    isRefetching,
+    error: eventsError,
+    refetch: refetchEvents,
+  } = useEvents();
   const { data: currentUser } = useCurrentUser();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedEventId, setSelectedEventId] = useState<string | null>('6aa27f3e7fe21147a19d3a1e'); // Default match to first card
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [isProfileModalVisible, setIsProfileModalVisible] = useState(false);
   const [isMobileWarningModalVisible, setIsMobileWarningModalVisible] = useState(false);
 
-  // Filter events based on search query (title, location, or category)
-  const filteredEvents = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return events;
+  // ── Filter sheet state ──────────────────────────────────────────────────────
+  const [isFilterSheetOpen, setIsFilterSheetOpen] = useState(false);
+  // Draft (inside sheet, not yet applied)
+  const [draftCategories, setDraftCategories] = useState<string[]>([]);
+  const [draftStatus, setDraftStatus] = useState<'all' | 'upcoming' | 'completed'>('all');
+  const [draftSort, setDraftSort] = useState<'newest' | 'oldest'>('newest');
+  // Applied (actually used to filter the list)
+  const [appliedCategories, setAppliedCategories] = useState<string[]>([]);
+  const [appliedStatus, setAppliedStatus] = useState<'all' | 'upcoming' | 'completed'>('all');
+  const [appliedSort, setAppliedSort] = useState<'newest' | 'oldest'>('newest');
 
-    return events.filter(
-      event =>
-        event.title.toLowerCase().includes(query) ||
-        event.location.toLowerCase().includes(query) ||
-        getCategoryFromTitle(event.title, event.category).toLowerCase().includes(query),
+  const hasActiveFilters =
+    appliedCategories.length > 0 || appliedStatus !== 'all' || appliedSort !== 'newest';
+
+  // Sheet slide animation
+  const sheetTranslateY = useMemo(() => new Animated.Value(500), []);
+  const sheetOpacity = useMemo(() => new Animated.Value(0), []);
+
+  // Filter button animations
+  const filterPressScale = useMemo(() => new Animated.Value(1), []);
+  const filterRotate = useMemo(() => new Animated.Value(0), []);
+
+  const openFilterSheet = useCallback(() => {
+    // Sync draft with applied
+    setDraftCategories(appliedCategories);
+    setDraftStatus(appliedStatus);
+    setDraftSort(appliedSort);
+    setIsFilterSheetOpen(true);
+    // Animate in
+    Animated.parallel([
+      Animated.timing(sheetTranslateY, { toValue: 0, duration: 340, useNativeDriver: true }),
+      Animated.timing(sheetOpacity, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }, [appliedCategories, appliedStatus, appliedSort, sheetTranslateY, sheetOpacity]);
+
+  const closeFilterSheet = useCallback(
+    (apply = false) => {
+      if (apply) {
+        setAppliedCategories(draftCategories);
+        setAppliedStatus(draftStatus);
+        setAppliedSort(draftSort);
+      }
+      Animated.parallel([
+        Animated.timing(sheetTranslateY, { toValue: 500, duration: 280, useNativeDriver: true }),
+        Animated.timing(sheetOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start(() => setIsFilterSheetOpen(false));
+    },
+    [draftCategories, draftStatus, draftSort, sheetTranslateY, sheetOpacity],
+  );
+
+  const handleFilterPress = useCallback(() => {
+    // Scale bounce
+    Animated.sequence([
+      Animated.spring(filterPressScale, {
+        toValue: 0.82,
+        useNativeDriver: true,
+        speed: 50,
+        bounciness: 0,
+      }),
+      Animated.spring(filterPressScale, {
+        toValue: 1,
+        useNativeDriver: true,
+        speed: 20,
+        bounciness: 14,
+      }),
+    ]).start();
+    // Icon rotation
+    Animated.timing(filterRotate, {
+      toValue: 1,
+      duration: 320,
+      useNativeDriver: true,
+    }).start(() =>
+      Animated.timing(filterRotate, {
+        toValue: 0,
+        duration: 0,
+        useNativeDriver: true,
+      }).start(),
     );
-  }, [events, searchQuery]);
+    openFilterSheet();
+  }, [filterPressScale, filterRotate, openFilterSheet]);
+
+  const toggleDraftCategory = useCallback((cat: string) => {
+    setDraftCategories(prev => (prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]));
+  }, []);
+
+  const clearAllFilters = useCallback(() => {
+    setAppliedCategories([]);
+    setAppliedStatus('all');
+    setAppliedSort('newest');
+    setDraftCategories([]);
+    setDraftStatus('all');
+    setDraftSort('newest');
+  }, []);
+
+  // ── Filtered + sorted event list ───────────────────────────────────────────
+  const filteredEvents = useMemo(() => {
+    const now = new Date();
+    const query = searchQuery.trim().toLowerCase();
+
+    let result = events.filter(event => {
+      // Text search
+      if (
+        query &&
+        !event.title.toLowerCase().includes(query) &&
+        !event.location.toLowerCase().includes(query) &&
+        !getCategoryFromTitle(event.title, event.category).toLowerCase().includes(query)
+      )
+        return false;
+
+      // Category filter
+      if (
+        appliedCategories.length > 0 &&
+        !appliedCategories.includes(getCategoryFromTitle(event.title, event.category))
+      )
+        return false;
+
+      // Status filter
+      const eventDate = new Date(event.date.$date);
+      if (appliedStatus === 'upcoming' && eventDate <= now) return false;
+      if (appliedStatus === 'completed' && eventDate > now) return false;
+
+      return true;
+    });
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      const diff = new Date(a.date.$date).getTime() - new Date(b.date.$date).getTime();
+      return appliedSort === 'newest' ? -diff : diff;
+    });
+
+    return result;
+  }, [events, searchQuery, appliedCategories, appliedStatus, appliedSort]);
 
   // Find selected event and check if mobile access is allowed
   const selectedEvent = useMemo(() => {
@@ -354,25 +477,6 @@ export const SelectEventScreen: React.FC = () => {
                   />
                 </View>
               )}
-
-              {/* Bottom 3-Dots Button */}
-              <TouchableOpacity
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                style={styles.moreOptionsBtn}
-                accessibilityRole="button"
-                accessibilityLabel={`More options for ${item.title}`}
-              >
-                <Svg
-                  width={16}
-                  height={16}
-                  viewBox="0 0 24 24"
-                  fill={isDark ? '#A1A1AA' : '#161616'}
-                >
-                  <Circle cx={12} cy={5} r={1.8} />
-                  <Circle cx={12} cy={12} r={1.8} />
-                  <Circle cx={12} cy={19} r={1.8} />
-                </Svg>
-              </TouchableOpacity>
             </View>
           </View>
         </Pressable>
@@ -483,25 +587,117 @@ export const SelectEventScreen: React.FC = () => {
               />
             </View>
 
-            {/* Filter Button */}
-            <IconButton
-              icon={
-                <SlidersHorizontal
-                  size={18}
-                  color={isDark ? '#F4F4F5' : '#161616'}
-                  strokeWidth={2}
-                />
-              }
-              onPress={() => {}}
-              size={48}
-              borderRadius={16}
-              style={{
-                backgroundColor: isDark ? '#1A1A1E' : 'rgba(239, 233, 223, 0.65)',
-                borderColor: isDark ? '#2E2E36' : 'transparent',
-              }}
-              accessibilityLabel="Filter events"
-            />
+            {/* Filter Button — animated */}
+            <Animated.View
+              style={[styles.filterButtonWrapper, { transform: [{ scale: filterPressScale }] }]}
+            >
+              <Pressable
+                onPress={handleFilterPress}
+                accessibilityLabel="Filter events"
+                accessibilityRole="button"
+                style={({ pressed }) => [
+                  styles.filterButton,
+                  {
+                    backgroundColor: hasActiveFilters
+                      ? isDark
+                        ? 'rgba(255, 107, 74, 0.18)'
+                        : 'rgba(255, 107, 74, 0.12)'
+                      : isDark
+                        ? '#1A1A1E'
+                        : 'rgba(239, 233, 223, 0.65)',
+                    borderColor: hasActiveFilters ? '#FF6B4A' : isDark ? '#2E2E36' : 'transparent',
+                    shadowColor: hasActiveFilters ? '#FF6B4A' : 'transparent',
+                    shadowOpacity: hasActiveFilters ? 0.45 : 0,
+                    shadowRadius: hasActiveFilters ? 10 : 0,
+                    elevation: hasActiveFilters ? 6 : 0,
+                  },
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Animated.View
+                  style={{
+                    transform: [
+                      {
+                        rotate: filterRotate.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: ['0deg', '45deg'],
+                        }),
+                      },
+                    ],
+                  }}
+                >
+                  <SlidersHorizontal
+                    size={18}
+                    color={hasActiveFilters ? '#FF6B4A' : isDark ? '#F4F4F5' : '#161616'}
+                    strokeWidth={2}
+                  />
+                </Animated.View>
+                {/* Active badge dot */}
+                {hasActiveFilters && (
+                  <View style={[styles.filterBadgeDot, { backgroundColor: '#FF6B4A' }]} />
+                )}
+              </Pressable>
+            </Animated.View>
           </View>
+
+          {/* ── ACTIVE FILTER CHIPS (scrollable strip) ── */}
+          {hasActiveFilters && (
+            <View style={styles.activeChipsRow}>
+              {appliedStatus !== 'all' && (
+                <Pressable
+                  onPress={() => setAppliedStatus('all')}
+                  style={[
+                    styles.activeChip,
+                    {
+                      backgroundColor: isDark ? 'rgba(255,107,74,0.18)' : 'rgba(255,107,74,0.12)',
+                      borderColor: '#FF6B4A',
+                    },
+                  ]}
+                >
+                  <Text style={styles.activeChipText}>
+                    {appliedStatus === 'upcoming' ? '⏳ Upcoming' : '✓ Completed'}
+                  </Text>
+                  <X size={10} color="#FF6B4A" strokeWidth={2.5} />
+                </Pressable>
+              )}
+              {appliedCategories.map(cat => (
+                <Pressable
+                  key={cat}
+                  onPress={() => setAppliedCategories(prev => prev.filter(c => c !== cat))}
+                  style={[
+                    styles.activeChip,
+                    {
+                      backgroundColor: isDark ? 'rgba(255,107,74,0.18)' : 'rgba(255,107,74,0.12)',
+                      borderColor: '#FF6B4A',
+                    },
+                  ]}
+                >
+                  <Text style={styles.activeChipText}>{cat}</Text>
+                  <X size={10} color="#FF6B4A" strokeWidth={2.5} />
+                </Pressable>
+              ))}
+              {appliedSort !== 'newest' && (
+                <Pressable
+                  onPress={() => setAppliedSort('newest')}
+                  style={[
+                    styles.activeChip,
+                    {
+                      backgroundColor: isDark ? 'rgba(255,107,74,0.18)' : 'rgba(255,107,74,0.12)',
+                      borderColor: '#FF6B4A',
+                    },
+                  ]}
+                >
+                  <Text style={styles.activeChipText}>↑ Oldest first</Text>
+                  <X size={10} color="#FF6B4A" strokeWidth={2.5} />
+                </Pressable>
+              )}
+              <Pressable onPress={clearAllFilters} style={styles.clearAllChip}>
+                <Text style={[styles.clearAllChipText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Clear all
+                </Text>
+              </Pressable>
+            </View>
+          )}
         </View>
         {/* end headerWrapper */}
 
@@ -513,26 +709,212 @@ export const SelectEventScreen: React.FC = () => {
         ) : (
           <FlatList
             data={filteredEvents}
-            keyExtractor={item => item._id.$oid}
+            keyExtractor={item => item._id.$oid || item.id}
             renderItem={renderEventCard}
             contentContainerStyle={styles.listContent}
             showsVerticalScrollIndicator={false}
+            refreshing={isRefetching}
+            onRefresh={refetchEvents}
             ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Inbox size={36} color={isDark ? '#71717A' : '#A89E92'} strokeWidth={1.5} />
-                <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                  No events found
-                </Text>
-                <Text style={[styles.emptySubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-                  {searchQuery
-                    ? `No events matching "${searchQuery}".`
-                    : 'No active events available to display.'}
-                </Text>
-              </View>
+              eventsError ? (
+                <View style={styles.emptyContainer}>
+                  <AlertCircle size={36} color="#FF6B4A" strokeWidth={1.5} />
+                  <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Failed to load events
+                  </Text>
+                  <Text style={[styles.emptySubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                    {eventsError.message || 'Unable to connect to server. Please try again.'}
+                  </Text>
+                  <TouchableOpacity onPress={() => refetchEvents()} style={styles.emptyRetryButton}>
+                    <Text style={styles.emptyRetryButtonText}>Tap to Retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.emptyContainer}>
+                  <Inbox size={36} color={isDark ? '#71717A' : '#A89E92'} strokeWidth={1.5} />
+                  <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    No events found
+                  </Text>
+                  <Text style={[styles.emptySubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                    {searchQuery
+                      ? `No events matching "${searchQuery}".`
+                      : 'No active events available to display.'}
+                  </Text>
+                </View>
+              )
             }
           />
         )}
       </SafeAreaView>
+
+      {/* ── FILTER BOTTOM SHEET ──────────────────────────────────────────────── */}
+      <Modal
+        visible={isFilterSheetOpen}
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={() => closeFilterSheet(false)}
+      >
+        {/* Backdrop */}
+        <Animated.View style={[styles.sheetBackdrop, { opacity: sheetOpacity }]}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => closeFilterSheet(false)} />
+        </Animated.View>
+
+        {/* Sheet panel */}
+        <Animated.View
+          style={[
+            styles.sheetPanel,
+            {
+              backgroundColor: isDark ? '#18181B' : '#FFFFFF',
+              transform: [{ translateY: sheetTranslateY }],
+            },
+          ]}
+        >
+          {/* Handle bar */}
+          <View style={[styles.sheetHandle, { backgroundColor: isDark ? '#3F3F46' : '#D4CECA' }]} />
+
+          {/* Header row */}
+          <View style={styles.sheetHeaderRow}>
+            <Text style={[styles.sheetTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+              Filter Events
+            </Text>
+            <Pressable onPress={() => closeFilterSheet(false)} hitSlop={12}>
+              <X size={20} color={isDark ? '#71717A' : '#8B847D'} strokeWidth={2} />
+            </Pressable>
+          </View>
+
+          {/* ── Status ── */}
+          <Text style={[styles.sheetSectionLabel, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+            STATUS
+          </Text>
+          <View style={styles.sheetChipRow}>
+            {(['all', 'upcoming', 'completed'] as const).map(s => {
+              const label = s === 'all' ? 'All' : s === 'upcoming' ? '⏳ Upcoming' : '✓ Completed';
+              const active = draftStatus === s;
+              return (
+                <Pressable
+                  key={s}
+                  onPress={() => setDraftStatus(s)}
+                  style={[
+                    styles.sheetChip,
+                    active
+                      ? { backgroundColor: '#FF6B4A', borderColor: '#FF6B4A' }
+                      : {
+                          backgroundColor: isDark ? '#26262E' : 'rgba(239,233,223,0.6)',
+                          borderColor: isDark ? '#3F3F46' : 'transparent',
+                        },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.sheetChipText,
+                      { color: active ? '#FFF' : isDark ? '#D4D4D8' : '#44403C' },
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* ── Category ── */}
+          <Text style={[styles.sheetSectionLabel, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+            CATEGORY
+          </Text>
+          <View style={styles.sheetChipRow}>
+            {[
+              'WEDDING',
+              'RECEPTION',
+              'ENGAGEMENT',
+              'BIRTHDAY',
+              'HOUSEWARMING',
+              'CORPORATE',
+              'GRADUATION',
+              'BRIDAL',
+              'SPORTS',
+            ].map(cat => {
+              const active = draftCategories.includes(cat);
+              return (
+                <Pressable
+                  key={cat}
+                  onPress={() => toggleDraftCategory(cat)}
+                  style={[
+                    styles.sheetChip,
+                    active
+                      ? { backgroundColor: '#FF6B4A', borderColor: '#FF6B4A' }
+                      : {
+                          backgroundColor: isDark ? '#26262E' : 'rgba(239,233,223,0.6)',
+                          borderColor: isDark ? '#3F3F46' : 'transparent',
+                        },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.sheetChipText,
+                      { color: active ? '#FFF' : isDark ? '#D4D4D8' : '#44403C' },
+                    ]}
+                  >
+                    {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* ── Sort ── */}
+          <Text style={[styles.sheetSectionLabel, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+            SORT BY DATE
+          </Text>
+          <View style={styles.sheetChipRow}>
+            {(['newest', 'oldest'] as const).map(s => {
+              const active = draftSort === s;
+              return (
+                <Pressable
+                  key={s}
+                  onPress={() => setDraftSort(s)}
+                  style={[
+                    styles.sheetChip,
+                    active
+                      ? { backgroundColor: '#FF6B4A', borderColor: '#FF6B4A' }
+                      : {
+                          backgroundColor: isDark ? '#26262E' : 'rgba(239,233,223,0.6)',
+                          borderColor: isDark ? '#3F3F46' : 'transparent',
+                        },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.sheetChipText,
+                      { color: active ? '#FFF' : isDark ? '#D4D4D8' : '#44403C' },
+                    ]}
+                  >
+                    {s === 'newest' ? '↓ Newest first' : '↑ Oldest first'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* ── Action Buttons ── */}
+          <View style={styles.sheetActionsRow}>
+            <Pressable
+              onPress={() => {
+                clearAllFilters();
+                closeFilterSheet(false);
+              }}
+              style={[styles.sheetResetBtn, { borderColor: isDark ? '#3F3F46' : '#D4CECA' }]}
+            >
+              <Text style={[styles.sheetResetBtnText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                Reset
+              </Text>
+            </Pressable>
+            <Pressable onPress={() => closeFilterSheet(true)} style={styles.sheetApplyBtn}>
+              <Text style={styles.sheetApplyBtnText}>Apply Filters</Text>
+            </Pressable>
+          </View>
+        </Animated.View>
+      </Modal>
 
       {/* ── STICKY FOOTER BAR ── */}
       <View
@@ -1235,6 +1617,21 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     fontFamily: FONTS.plusJakartaSans.regular,
   },
+  emptyRetryButton: {
+    marginTop: 14,
+    backgroundColor: '#FF6B4A',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyRetryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: FONTS.plusJakartaSans.bold,
+  },
 
   // Sticky Footer — paddingBottom is set dynamically via insets in JSX
   footerContainer: {
@@ -1507,6 +1904,166 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   warningModalBtnText: {
+    color: '#FFFFFF',
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+
+  // Animated Filter Button
+  filterButtonWrapper: {
+    borderRadius: 16,
+  },
+  filterButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterBadgeDot: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  // Active filter chips strip
+  activeChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  activeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  activeChipText: {
+    fontSize: 11,
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontWeight: '600',
+    color: '#FF6B4A',
+  },
+  clearAllChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  clearAllChipText: {
+    fontSize: 11,
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontWeight: '500',
+    textDecorationLine: 'underline',
+  },
+
+  // Filter bottom sheet
+  sheetBackdrop: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    zIndex: 10,
+  },
+  sheetPanel: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 20,
+    paddingBottom: 34,
+    zIndex: 11,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 20,
+    elevation: 20,
+  },
+  sheetHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 12,
+    marginBottom: 16,
+  },
+  sheetHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  sheetTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 20,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+  },
+  sheetSectionLabel: {
+    fontSize: 11,
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
+  sheetChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 20,
+  },
+  sheetChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  sheetChipText: {
+    fontSize: 13,
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontWeight: '600',
+  },
+  sheetActionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 4,
+  },
+  sheetResetBtn: {
+    flex: 1,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetResetBtnText: {
+    fontSize: 14,
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontWeight: '600',
+  },
+  sheetApplyBtn: {
+    flex: 2,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FF6B4A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#FF6B4A',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  sheetApplyBtnText: {
     color: '#FFFFFF',
     fontFamily: FONTS.plusJakartaSans.bold,
     fontSize: 15,

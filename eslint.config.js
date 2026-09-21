@@ -9,6 +9,17 @@ module.exports = defineConfig([
   eslintPluginPrettierRecommended,
   eslintConfigPrettier,
   {
+    files: ['**/*.js'],
+    languageOptions: {
+      globals: {
+        __dirname: 'readonly',
+        module: 'readonly',
+        require: 'readonly',
+        process: 'readonly',
+      },
+    },
+  },
+  {
     ignores: ['dist/*', '.expo/*', 'node_modules/*', 'public/*'],
   },
 ]);

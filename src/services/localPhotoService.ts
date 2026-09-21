@@ -50,6 +50,30 @@ export function isRawPhoto(name: string): boolean {
 }
 
 /**
+ * Checks if storage permission is already granted without prompting the user.
+ */
+export async function checkStoragePermission(): Promise<boolean> {
+  if (Platform.OS !== 'android') {
+    return true;
+  }
+  try {
+    const apiLevel =
+      typeof Platform.Version === 'number'
+        ? Platform.Version
+        : parseInt(String(Platform.Version), 10);
+    const permission =
+      apiLevel >= 33
+        ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+        : PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE;
+
+    return await PermissionsAndroid.check(permission);
+  } catch (error) {
+    console.error('[LocalPhotoService] Error checking storage permission:', error);
+    return false;
+  }
+}
+
+/**
  * Requests the correct Android storage permission based on API level
  * - Android 13+ (API 33+): READ_MEDIA_IMAGES
  * - Android 12 and below (API <= 32): READ_EXTERNAL_STORAGE
@@ -98,41 +122,39 @@ export async function requestStoragePermission(): Promise<boolean> {
  * Scans /sdcard/DCIM/Entephoto dynamically using Expo SDK 57 Directory API.
  * Returns only real photos found on disk, or empty array with clear error logs.
  */
-export async function scanDcimEntephotoPhotos(): Promise<GalleryPhotoItem[]> {
+export async function scanDcimEntephotoPhotos(
+  silent: boolean = false,
+): Promise<GalleryPhotoItem[]> {
   if (Platform.OS !== 'android') {
-    console.log('[LocalPhotoService] Non-Android platform detected; skipping DCIM scan.');
     return [];
   }
 
-  const hasPermission = await requestStoragePermission();
+  const hasPermission = silent ? await checkStoragePermission() : await requestStoragePermission();
   if (!hasPermission) {
-    console.warn(
-      '[LocalPhotoService] Storage permission denied. Cannot scan DCIM/Entephoto directory.',
-    );
+    if (!silent) {
+      console.warn(
+        '[LocalPhotoService] Storage permission denied. Cannot scan DCIM/Entephoto directory.',
+      );
+    }
     return [];
   }
 
   try {
-    console.log(`[LocalPhotoService] Scanning directory: ${CANONICAL_DCIM_DIR_URI}`);
     const dir = new Directory(CANONICAL_DCIM_DIR_URI);
 
     if (!dir.exists) {
-      console.warn(
-        `[LocalPhotoService] Directory does not exist on device: ${CANONICAL_DCIM_DIR_URI}`,
-      );
+      if (!silent) {
+        console.warn(
+          `[LocalPhotoService] Directory does not exist on device: ${CANONICAL_DCIM_DIR_URI}`,
+        );
+      }
       return [];
     }
 
     const entries = dir.list();
-    console.log(`[LocalPhotoService] Directory entries found: ${entries.length}`);
-
     const photoEntries = entries.filter((entry): entry is File => {
       return entry instanceof File && isPhotoFile(entry.name);
     });
-
-    console.log(
-      `[LocalPhotoService] Valid photo files found in DCIM/Entephoto: ${photoEntries.length}`,
-    );
 
     return photoEntries.map((file, index) => {
       const isRaw = isRawPhoto(file.name);
@@ -177,10 +199,10 @@ export function subscribeToDcimPhotos(
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let lastSignature = '';
 
-  const scanAndNotify = async () => {
+  const scanAndNotify = async (silent: boolean = true) => {
     if (!isSubscribed) return;
     try {
-      const photos = await scanDcimEntephotoPhotos();
+      const photos = await scanDcimEntephotoPhotos(silent);
       if (!isSubscribed) return;
 
       const signature = photos.map(p => p.uri).join('|');
@@ -194,8 +216,12 @@ export function subscribeToDcimPhotos(
     }
   };
 
-  // 1. Initial scan
-  scanAndNotify();
+  // 1. Initial request on subscription start
+  requestStoragePermission().then(granted => {
+    if (granted && isSubscribed) {
+      scanAndNotify(false);
+    }
+  });
 
   // 2. Set up native directory watcher if directory exists
   if (Platform.OS === 'android') {

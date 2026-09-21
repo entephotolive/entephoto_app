@@ -1,6 +1,6 @@
 import React from 'react';
-import { Pressable, StyleSheet, ViewStyle, StyleProp, Animated } from 'react-native';
-import { COLORS, RADII } from '@/constants/theme';
+import { Pressable, StyleSheet, ViewStyle, StyleProp } from 'react-native';
+import { COLORS } from '@/constants/theme';
 
 export interface IconButtonProps {
   icon: React.ReactNode;

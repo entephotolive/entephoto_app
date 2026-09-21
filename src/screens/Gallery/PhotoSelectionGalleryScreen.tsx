@@ -6,9 +6,9 @@ import {
   TouchableOpacity,
   Pressable,
   FlatList,
-  Modal,
   Alert,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -18,7 +18,6 @@ import {
   ArrowRight,
   MoreVertical,
   Cloud,
-  X,
   Camera,
   RefreshCw,
 } from 'lucide-react-native';
@@ -35,7 +34,9 @@ import {
   deleteLocalPhoto,
   CANONICAL_DCIM_DIR_URI,
 } from '@/services/localPhotoService';
+import { uploadSinglePhoto } from '@/services/photoUploadService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
+import { GalleryActionsSheet } from './components/GalleryActionsSheet';
 
 export type PhotoStatus = 'new' | 'marked' | 'uploaded';
 
@@ -62,6 +63,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
 
   // Route Parameters
+  const eventId = route.params?.eventId || '';
   const eventTitle = route.params?.eventTitle || 'Rahul & Fathima';
   const eventDateFormatted = route.params?.eventDate
     ? formatEventDate(route.params.eventDate)
@@ -74,6 +76,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
+
+  // Uploading state
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+    filename?: string;
+  } | null>(null);
+  const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
 
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
@@ -159,15 +171,23 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
   }, [navigation]);
 
-  // Toggle Photo Selection
+  // Toggle Photo Selection with 20-photo maximum limit
   const togglePhotoSelection = useCallback((id: string) => {
-    setPhotos(prev =>
-      prev.map(item => {
+    setPhotos(prev => {
+      const currentSelectedCount = prev.filter(p => p.selected).length;
+      return prev.map(item => {
         if (item.id === id) {
           if (item.status === 'uploaded') {
             return item;
           }
           const nextSelected = !item.selected;
+          if (nextSelected && currentSelectedCount >= 20) {
+            Alert.alert(
+              'Selection Limit Reached',
+              'You can mark and upload a maximum of 20 photos at a time.',
+            );
+            return item;
+          }
           return {
             ...item,
             selected: nextSelected,
@@ -175,46 +195,147 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           };
         }
         return item;
-      }),
-    );
+      });
+    });
   }, []);
 
-  // Quick Select / Deselect All
+  // Open Gallery Actions Sheet
   const handleMoreOptions = useCallback(() => {
-    Alert.alert('Gallery Actions', 'Choose an action for this tethered session:', [
-      {
-        text: 'Rescan DCIM Folder',
-        onPress: handleManualRescan,
-      },
-      {
-        text: 'Select All New Photos',
-        onPress: () => {
-          setPhotos(prev =>
-            prev.map(p =>
-              p.status !== 'uploaded' ? { ...p, selected: true, status: 'marked' } : p,
-            ),
-          );
+    setIsActionsModalVisible(true);
+  }, []);
+
+  // Select All Photos (Capped at 20)
+  const handleSelectAll = useCallback(() => {
+    let count = 0;
+    setPhotos(prev =>
+      prev.map(p => {
+        if (p.status !== 'uploaded' && count < 20) {
+          count++;
+          return { ...p, selected: true, status: 'marked' };
+        }
+        return p;
+      }),
+    );
+    setIsActionsModalVisible(false);
+    if (photos.filter(p => p.status !== 'uploaded').length > 20) {
+      Alert.alert('Limit Applied', 'Selected the first 20 photos (maximum batch size).');
+    }
+  }, [photos]);
+
+  // Select All New Photos (Capped at 20)
+  const handleSelectAllNew = useCallback(() => {
+    let count = 0;
+    setPhotos(prev =>
+      prev.map(p => {
+        if (p.status === 'new' && count < 20) {
+          count++;
+          return { ...p, selected: true, status: 'marked' };
+        }
+        return p;
+      }),
+    );
+    setIsActionsModalVisible(false);
+    if (photos.filter(p => p.status === 'new').length > 20) {
+      Alert.alert('Limit Applied', 'Selected the first 20 new photos (maximum batch size).');
+    }
+  }, [photos]);
+
+  // Invert Selection (Capped at 20)
+  const handleInvertSelection = useCallback(() => {
+    let count = 0;
+    setPhotos(prev =>
+      prev.map(p => {
+        if (p.status === 'uploaded') return p;
+        const nextSelected = !p.selected;
+        if (nextSelected && count < 20) {
+          count++;
+          return {
+            ...p,
+            selected: true,
+            status: 'marked',
+          };
+        }
+        return {
+          ...p,
+          selected: false,
+          status: p.status === 'marked' ? 'new' : p.status,
+        };
+      }),
+    );
+    setIsActionsModalVisible(false);
+  }, []);
+
+  // Clear Selection
+  const handleClearSelection = useCallback(() => {
+    setPhotos(prev =>
+      prev.map(p => ({
+        ...p,
+        selected: false,
+        status: p.status === 'marked' ? 'new' : p.status,
+      })),
+    );
+    setIsActionsModalVisible(false);
+  }, []);
+
+  // Batch Delete Selected Photos
+  const handleDeleteSelectedPhotos = useCallback(() => {
+    const selectedPhotos = photos.filter(p => p.selected);
+    if (selectedPhotos.length === 0) {
+      Alert.alert('No Photos Selected', 'Please select one or more photos to delete.');
+      return;
+    }
+
+    Alert.alert(
+      'Delete Selected Photos',
+      `Are you sure you want to permanently delete ${selectedPhotos.length} photo${selectedPhotos.length > 1 ? 's' : ''} from your device storage? This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: `Delete (${selectedPhotos.length})`,
+          style: 'destructive',
+          onPress: async () => {
+            setIsActionsModalVisible(false);
+            const selectedUris = new Set(selectedPhotos.map(p => p.uri));
+            const selectedIds = new Set(selectedPhotos.map(p => p.id));
+
+            // Delete files from storage
+            await Promise.all(
+              selectedPhotos.map(async photo => {
+                try {
+                  await deleteLocalPhoto(photo.uri);
+                } catch (e) {
+                  console.error('[GalleryActions] Failed to delete photo file:', photo.uri, e);
+                }
+              }),
+            );
+
+            // Update state
+            setPhotos(prev => prev.filter(p => !selectedIds.has(p.id) && !selectedUris.has(p.uri)));
+
+            Alert.alert(
+              'Photos Deleted 🗑️',
+              `Successfully deleted ${selectedPhotos.length} photo${selectedPhotos.length > 1 ? 's' : ''} from local storage.`,
+            );
+          },
         },
-      },
-      {
-        text: 'Clear Selection',
-        onPress: () => {
-          setPhotos(prev =>
-            prev.map(p => ({
-              ...p,
-              selected: false,
-              status: p.status === 'marked' ? 'new' : p.status,
-            })),
-          );
-        },
-      },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+      ],
+    );
+  }, [photos]);
+
+  // Rescan Trigger from Action Sheet
+  const handleRescanFromSheet = useCallback(async () => {
+    setIsActionsModalVisible(false);
+    await handleManualRescan();
   }, [handleManualRescan]);
 
-  // Upload Selected Photos CTA
+  // Upload Selected Photos (Bulk upload: Each image uploaded independently)
   const handleUploadPhotos = useCallback(() => {
-    if (selectedCount === 0) {
+    if (isUploading) {
+      return;
+    }
+
+    const selectedPhotos = photos.filter(p => p.selected && p.status !== 'uploaded');
+    if (selectedPhotos.length === 0) {
       Alert.alert(
         'No Photos Selected',
         'Please tap on the photos you wish to mark and upload to the event cloud.',
@@ -222,27 +343,92 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
+    if (!eventId) {
+      Alert.alert(
+        'Event Not Specified',
+        'No event ID is associated with this session. Please select a valid event first.',
+      );
+      return;
+    }
+
+    const batchToUpload = selectedPhotos.slice(0, 20);
+
     Alert.alert(
       'Upload Photos',
-      `Ready to upload ${selectedCount} selected photos to ${eventTitle}?`,
+      `Ready to upload ${batchToUpload.length} selected photo${batchToUpload.length > 1 ? 's' : ''} to "${eventTitle}"? Each photo is processed independently.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: `Upload (${selectedCount})`,
+          text: `Upload (${batchToUpload.length})`,
           style: 'default',
-          onPress: () => {
-            setPhotos(prev =>
-              prev.map(p => (p.selected ? { ...p, selected: false, status: 'uploaded' } : p)),
-            );
-            Alert.alert(
-              'Upload Started! 🚀',
-              `${selectedCount} photos are uploading in the background. Real-time tethering remains active.`,
-            );
+          onPress: async () => {
+            setIsUploading(true);
+            const total = batchToUpload.length;
+            let successCount = 0;
+            let failCount = 0;
+
+            setUploadProgress({ current: 0, total });
+
+            for (let i = 0; i < total; i++) {
+              const photo = batchToUpload[i];
+              setUploadProgress({
+                current: i + 1,
+                total,
+                filename: photo.filename,
+              });
+              setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
+
+              try {
+                await uploadSinglePhoto(eventId, photo);
+                successCount++;
+                // Mark individual photo as uploaded immediately upon success
+                setPhotos(prev =>
+                  prev.map(p =>
+                    p.id === photo.id || p.uri === photo.uri
+                      ? { ...p, selected: false, status: 'uploaded' }
+                      : p,
+                  ),
+                );
+              } catch (err: any) {
+                console.error(
+                  `[PhotoGallery] Upload error for ${photo.filename}:`,
+                  err?.response?.data || err?.message || err,
+                );
+                failCount++;
+              } finally {
+                setUploadingPhotoIds(prev => {
+                  const next = new Set(prev);
+                  next.delete(photo.id);
+                  return next;
+                });
+              }
+            }
+
+            setIsUploading(false);
+            setUploadProgress(null);
+
+            if (failCount === 0) {
+              Alert.alert(
+                'Upload Complete! 🚀',
+                `Successfully uploaded all ${successCount} photos to "${eventTitle}".`,
+              );
+            } else {
+              Alert.alert(
+                'Upload Finished ⚠️',
+                `Uploaded: ${successCount}\nFailed: ${failCount}\n\nYou can retry uploading any remaining marked photos.`,
+              );
+            }
           },
         },
       ],
     );
-  }, [selectedCount, eventTitle]);
+  }, [isUploading, photos, eventId, eventTitle]);
+
+  // Upload Trigger from Action Sheet
+  const handleUploadFromSheet = useCallback(() => {
+    setIsActionsModalVisible(false);
+    handleUploadPhotos();
+  }, [handleUploadPhotos]);
 
   // Delete Single Photo
   const handleDeletePhoto = useCallback(async (photo: GalleryPhotoItem) => {
@@ -252,16 +438,45 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   // Upload Single Photo
   const handleUploadSinglePhoto = useCallback(
-    (photo: GalleryPhotoItem) => {
-      setPhotos(prev =>
-        prev.map(p => (p.id === photo.id ? { ...p, selected: false, status: 'uploaded' } : p)),
-      );
-      Alert.alert(
-        'Photo Uploaded! 🚀',
-        `${photo.filename || 'Photo'} has been uploaded to ${eventTitle}.`,
-      );
+    async (photo: GalleryPhotoItem) => {
+      if (!eventId) {
+        Alert.alert('Event Not Specified', 'No active event ID available for upload.');
+        return;
+      }
+      setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
+      try {
+        await uploadSinglePhoto(eventId, photo);
+        setPhotos(prev =>
+          prev.map(p =>
+            p.id === photo.id || p.uri === photo.uri
+              ? { ...p, selected: false, status: 'uploaded' }
+              : p,
+          ),
+        );
+        Alert.alert(
+          'Photo Uploaded! 🚀',
+          `${photo.filename || 'Photo'} has been uploaded to "${eventTitle}".`,
+        );
+      } catch (err: any) {
+        console.error(`[PhotoGallery] Failed to upload ${photo.filename}:`, err);
+        Alert.alert(
+          'Upload Failed',
+          `Could not upload ${photo.filename || 'photo'}: ${
+            err?.response?.data?.error ||
+            err?.response?.data?.details ||
+            err?.message ||
+            'Network error'
+          }`,
+        );
+      } finally {
+        setUploadingPhotoIds(prev => {
+          const next = new Set(prev);
+          next.delete(photo.id);
+          return next;
+        });
+      }
     },
-    [eventTitle],
+    [eventId, eventTitle],
   );
 
   // Render Single Grid Tile
@@ -269,6 +484,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     ({ item, index }: { item: GalleryPhotoItem; index: number }) => {
       const isSelected = item.selected;
       const isUploaded = item.status === 'uploaded';
+      const isPhotoUploading = uploadingPhotoIds.has(item.id);
 
       return (
         <View style={styles.gridCellContainer}>
@@ -302,15 +518,22 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             <Pressable
               onPress={e => {
                 e.stopPropagation();
-                togglePhotoSelection(item.id);
+                if (!isPhotoUploading) {
+                  togglePhotoSelection(item.id);
+                }
               }}
               hitSlop={10}
+              disabled={isPhotoUploading}
               style={styles.selectionIndicatorContainer}
               accessibilityRole="checkbox"
               accessibilityState={{ checked: isSelected }}
               accessibilityLabel={`Select photo ${item.filename || item.id}`}
             >
-              {isUploaded ? (
+              {isPhotoUploading ? (
+                <View style={styles.uploadingSpinnerBadge}>
+                  <ActivityIndicator size={11} color="#FFFFFF" />
+                </View>
+              ) : isUploaded ? (
                 <View style={styles.uploadedCloudBadge}>
                   <Cloud size={13} color="#FFFFFF" strokeWidth={2.4} />
                 </View>
@@ -328,7 +551,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         </View>
       );
     },
-    [togglePhotoSelection],
+    [togglePhotoSelection, uploadingPhotoIds],
   );
 
   return (
@@ -361,9 +584,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               numberOfLines={2}
             >
               {eventTitle}
-            </Text>
-            <Text style={[styles.eventSublineText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-              {eventCategory} • {eventDateFormatted}
             </Text>
           </View>
 
@@ -581,18 +801,46 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             {/* Right Action: Upload CTA Button with Tactile Depress */}
             <Pressable
               onPress={handleUploadPhotos}
+              disabled={isUploading || selectedCount === 0}
               style={({ pressed }) => [
                 styles.dockUploadBtnWrapper,
+                (isUploading || selectedCount === 0) && styles.dockUploadBtnDisabledWrapper,
                 {
-                  transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
+                  transform: [
+                    { translateY: pressed && !isUploading && selectedCount > 0 ? 2 : 0 },
+                    { translateX: pressed && !isUploading && selectedCount > 0 ? 2 : 0 },
+                  ],
                 },
               ]}
               accessibilityRole="button"
               accessibilityLabel="Upload Photos"
             >
-              <View style={styles.dockUploadBtnFace}>
-                <Text style={styles.dockUploadBtnText}>Upload Photos</Text>
-                <ArrowRight size={18} color="#FFFFFF" strokeWidth={2.6} style={{ marginLeft: 8 }} />
+              <View
+                style={[
+                  styles.dockUploadBtnFace,
+                  (isUploading || selectedCount === 0) && styles.dockUploadBtnDisabledFace,
+                ]}
+              >
+                {isUploading ? (
+                  <>
+                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.dockUploadBtnText}>
+                      Uploading ({uploadProgress?.current || 0}/{uploadProgress?.total || 0})...
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.dockUploadBtnText}>
+                      {selectedCount > 0 ? `Upload (${selectedCount})` : 'Upload Photos'}
+                    </Text>
+                    <ArrowRight
+                      size={18}
+                      color="#FFFFFF"
+                      strokeWidth={2.6}
+                      style={{ marginLeft: 8 }}
+                    />
+                  </>
+                )}
               </View>
             </Pressable>
           </View>
@@ -610,6 +858,23 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onUploadPhoto={handleUploadSinglePhoto}
           onDeletePhoto={handleDeletePhoto}
           isDark={isDark}
+        />
+
+        {/* ── 6. MATCHING THEME GALLERY ACTIONS SHEET ── */}
+        <GalleryActionsSheet
+          visible={isActionsModalVisible}
+          onClose={() => setIsActionsModalVisible(false)}
+          isDark={isDark}
+          totalCount={totalCount}
+          selectedCount={selectedCount}
+          newCount={newCount}
+          onRescan={handleRescanFromSheet}
+          onSelectAll={handleSelectAll}
+          onSelectAllNew={handleSelectAllNew}
+          onInvertSelection={handleInvertSelection}
+          onClearSelection={handleClearSelection}
+          onUploadSelected={handleUploadFromSheet}
+          onDeleteSelected={handleDeleteSelectedPhotos}
         />
       </SafeAreaView>
     </AppBackground>
@@ -858,6 +1123,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  uploadingSpinnerBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(22, 22, 22, 0.92)',
+    borderWidth: 1.5,
+    borderColor: '#FFA07A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   // ── Empty State Styles ──
   emptyContainer: {
@@ -969,6 +1244,9 @@ const styles = StyleSheet.create({
   dockUploadBtnWrapper: {
     borderRadius: 28,
   },
+  dockUploadBtnDisabledWrapper: {
+    opacity: 0.65,
+  },
   dockUploadBtnFace: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -979,6 +1257,10 @@ const styles = StyleSheet.create({
     borderRadius: 28,
     borderWidth: 1.5,
     borderColor: '#161616',
+  },
+  dockUploadBtnDisabledFace: {
+    backgroundColor: '#3A3A40',
+    borderColor: '#3A3A40',
   },
   dockUploadBtnText: {
     fontFamily: FONTS.syne.bold,

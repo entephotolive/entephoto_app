@@ -7,18 +7,26 @@ import {
   Linking,
   Animated,
   Platform,
-  StatusBar,
   ScrollView,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Path, Polygon, Defs, RadialGradient, Stop, Circle } from 'react-native-svg';
-import { Shield, Zap, Heart, ArrowRight, Sun, Moon } from 'lucide-react-native';
+import Svg, { Path, Polygon } from 'react-native-svg';
+import {
+  Shield,
+  Zap,
+  Heart,
+  ArrowRight,
+  Sun,
+  Moon,
+  AlertTriangle,
+  RotateCw,
+  X,
+} from 'lucide-react-native';
 
 import { useAuthSession } from './hooks/useAuthSession';
 import { Text } from '@/components/Text';
 import { useTheme } from '@/constants/theme';
-import { ENV } from '@/constants/env';
 
 import { AppBackground } from '@/components/AppBackground';
 
@@ -56,7 +64,7 @@ const SparkleStar: React.FC<{ size?: number; color?: string }> = ({
 
 export const GoogleSignInScreen: React.FC = () => {
   const { colors, isDark, toggleTheme } = useTheme();
-  const { signIn, isLoading, error, clearError, canRetry } = useAuthSession();
+  const { signIn, isLoading, error, debugInfo, clearError, canRetry } = useAuthSession();
 
   const [pressScale] = useState(new Animated.Value(1));
 
@@ -174,41 +182,79 @@ export const GoogleSignInScreen: React.FC = () => {
               <Text style={[styles.headlineDot, { color: colors.primary }]}>.</Text>
             </Text>
 
-            {/* Error Message with action if any */}
+            {/* Error Banner with Debug Diagnostics */}
             {error ? (
               <View
                 style={[
                   styles.errorBanner,
-                  { backgroundColor: `${colors.error}15`, borderColor: colors.error },
+                  {
+                    backgroundColor: isDark
+                      ? 'rgba(239, 68, 68, 0.12)'
+                      : 'rgba(254, 242, 242, 0.95)',
+                    borderColor: colors.error,
+                  },
                 ]}
               >
-                <Text style={[styles.errorText, { color: colors.error }]}>{error}</Text>
+                <View style={styles.errorHeaderRow}>
+                  <View style={styles.errorIconTitleRow}>
+                    <AlertTriangle size={17} color={colors.error} strokeWidth={2.2} />
+                    <Text style={[styles.errorTitle, { color: colors.error }]}>Sign-In Failed</Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={clearError}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    style={styles.dismissButton}
+                    accessibilityRole="button"
+                    accessibilityLabel="Dismiss error"
+                  >
+                    <X size={15} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.errorText, { color: colors.textPrimary }]}>{error}</Text>
+
+                {debugInfo ? (
+                  <View
+                    style={[
+                      styles.debugBox,
+                      {
+                        backgroundColor: isDark ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0.05)',
+                        borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.debugStepText, { color: colors.textSecondary }]}>
+                      Failed Step:{' '}
+                      <Text style={{ color: colors.primary, fontWeight: '700' }}>
+                        {debugInfo.step}
+                      </Text>
+                    </Text>
+                    {debugInfo.code ? (
+                      <Text style={[styles.debugCodeText, { color: colors.textMuted }]}>
+                        Error Code: {String(debugInfo.code)}
+                      </Text>
+                    ) : null}
+                    {debugInfo.message && debugInfo.message !== error ? (
+                      <Text style={[styles.debugDetailText, { color: colors.textMuted }]}>
+                        {debugInfo.message}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+
                 {canRetry && (
                   <TouchableOpacity
                     onPress={handleSignIn}
-                    style={styles.retryButton}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={[styles.retryButton, { backgroundColor: colors.error }]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry Sign-in"
                   >
-                    <Text style={[styles.retryButtonText, { color: colors.error }]}>
-                      Tap to retry
-                    </Text>
+                    <RotateCw size={13} color="#FFFFFF" strokeWidth={2.2} />
+                    <Text style={styles.retryButtonText}>Tap to Retry</Text>
                   </TouchableOpacity>
                 )}
               </View>
             ) : null}
-
-            {/* --------------------------------------------------------- */}
-            {/* [MOCK AUTH BANNER START] - TEMPORARY FOR EXPO GO TESTING  */}
-            {/* --------------------------------------------------------- */}
-            {ENV.USE_MOCK_AUTH && (
-              <View style={styles.devMockBanner}>
-                <Text style={styles.devMockBannerBadge}>DEV MODE</Text>
-                <Text style={styles.devMockBannerText}>mock sign-in active (Expo Go)</Text>
-              </View>
-            )}
-            {/* --------------------------------------------------------- */}
-            {/* [MOCK AUTH BANNER END]                                   */}
-            {/* --------------------------------------------------------- */}
 
             {/* Primary Google Login Button */}
             <View style={styles.ctaContainer}>
@@ -529,76 +575,79 @@ const styles = StyleSheet.create({
 
   // Error Banner
   errorBanner: {
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    marginTop: 12,
+    borderWidth: 1.5,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 14,
     width: '100%',
     maxWidth: 320,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  errorHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  errorIconTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  errorTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+  },
+  dismissButton: {
+    padding: 2,
   },
   errorText: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: '500',
-    textAlign: 'center',
-    lineHeight: 18,
+    lineHeight: 17,
+  },
+  debugBox: {
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 3,
+  },
+  debugStepText: {
+    fontSize: 11,
+    fontWeight: '600',
+    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
+  },
+  debugCodeText: {
+    fontSize: 10.5,
+    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
+  },
+  debugDetailText: {
+    fontSize: 10.5,
+    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
+    lineHeight: 14,
   },
   retryButton: {
-    marginTop: 6,
-    alignSelf: 'center',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
   },
   retryButtonText: {
     fontSize: 12,
     fontWeight: '700',
-    textDecorationLine: 'underline',
-  },
-
-  // -----------------------------------------------------------
-  // [MOCK AUTH STYLES START] - TEMPORARY FOR EXPO GO TESTING
-  // -----------------------------------------------------------
-  devMockBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#FEF3C7',
-    borderColor: '#F59E0B',
-    borderWidth: 1.5,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    marginTop: 14,
-    marginBottom: -16,
-    zIndex: 20,
-    alignSelf: 'center',
-    shadowColor: '#F59E0B',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  devMockBannerBadge: {
-    backgroundColor: '#D97706',
     color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '900',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    letterSpacing: 0.5,
-    overflow: 'hidden',
   },
-  devMockBannerText: {
-    color: '#92400E',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: -0.2,
-  },
-  // -----------------------------------------------------------
-  // [MOCK AUTH STYLES END]
-  // -----------------------------------------------------------
 
   // Button
   ctaContainer: {

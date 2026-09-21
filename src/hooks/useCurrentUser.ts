@@ -1,6 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import userRaw from '@/data/user.json';
-import { useAuthStore, UserProfile } from '@/store/authStore';
+import { useState, useCallback } from 'react';
+import { useAuthStore } from '@/store/authStore';
 
 export interface UserModel {
   _id: { $oid: string };
@@ -23,50 +22,48 @@ export interface UseCurrentUserResult {
   refetch: () => Promise<void>;
 }
 
+const DEFAULT_USER: UserModel = {
+  _id: { $oid: '' },
+  name: 'Photographer',
+  email: '',
+  provider: 'google',
+  avatarUrl:
+    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=256',
+  isBlocked: false,
+  specializations: ['Wedding', 'Portrait', 'Event'],
+  role: 'photographer',
+  createdAt: { $date: new Date().toISOString() },
+  updatedAt: { $date: new Date().toISOString() },
+  phoneNumber: '',
+};
+
 /**
  * Hook to retrieve current logged in user profile.
- * Merges local user.json with Zustand authStore.
+ * Reads from Zustand authStore (populated by Google Sign-In backend response).
  */
 export const useCurrentUser = (): UseCurrentUserResult => {
   const storeUser = useAuthStore(state => state.user);
-  const [data, setData] = useState<UserModel>(() => {
-    return {
-      ...(userRaw as UserModel),
-      name: storeUser?.name || userRaw.name,
-      email: storeUser?.email || userRaw.email,
-      avatarUrl: storeUser?.photoUrl || userRaw.avatarUrl,
-    };
-  });
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
+
+  const data: UserModel = {
+    ...DEFAULT_USER,
+    _id: { $oid: storeUser?.id || '' },
+    name: storeUser?.name || DEFAULT_USER.name,
+    email: storeUser?.email || DEFAULT_USER.email,
+    avatarUrl: storeUser?.photoUrl || DEFAULT_USER.avatarUrl,
+  };
 
   const refetch = useCallback(async () => {
     setIsLoading(true);
     try {
-      setData({
-        ...(userRaw as UserModel),
-        name: storeUser?.name || userRaw.name,
-        email: storeUser?.email || userRaw.email,
-        avatarUrl: storeUser?.photoUrl || userRaw.avatarUrl,
-      });
       setError(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(err instanceof Error ? err : new Error('Failed to fetch user'));
     } finally {
       setIsLoading(false);
     }
-  }, [storeUser]);
-
-  useEffect(() => {
-    if (storeUser) {
-      setData(prev => ({
-        ...prev,
-        name: storeUser.name || prev.name,
-        email: storeUser.email || prev.email,
-        avatarUrl: storeUser.photoUrl || prev.avatarUrl,
-      }));
-    }
-  }, [storeUser]);
+  }, []);
 
   return {
     data,

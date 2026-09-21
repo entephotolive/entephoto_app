@@ -4,9 +4,9 @@
 import React, { createContext, useContext, useMemo, useState, useCallback, ReactNode } from 'react';
 import { useColorScheme, StatusBar } from 'react-native';
 import { lightColors, darkColors, ThemeColors } from './colors';
-import { TYPOGRAPHY, FONTS, typography, TypographyVariant } from './typography';
-import { SPACING, RADII, spacing, radius, radii } from './spacing';
-import { SHADOWS, shadows } from './shadows';
+import { TYPOGRAPHY, FONTS } from './typography';
+import { SPACING, RADII } from './spacing';
+import { SHADOWS } from './shadows';
 
 export type ThemeMode = 'system' | 'dark' | 'light';
 
@@ -98,6 +98,3 @@ export const useTheme = (): Theme => {
   }
   return context;
 };
-
-// ── Re-export types consumers may need ───────────────────────────────────────
-export type { TypographyVariant };

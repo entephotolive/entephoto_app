@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
 import { NavigationContainer, Theme as NavTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from './types';
@@ -14,23 +13,32 @@ const Root = createNativeStackNavigator<RootStackParamList>();
 
 export const RootNavigator: React.FC = () => {
   const { colors, isDark } = useTheme();
-  const { isAuthenticated, isLoading, setAuthenticated, setLoading } = useAuthStore();
+  const { isAuthenticated, isInitializing, setAuthenticated, setInitializing } = useAuthStore();
 
   // Initial session restoration on startup
   useEffect(() => {
     let mounted = true;
     const restore = async () => {
-      setLoading(true);
-      const status = await authService.checkAuthStatus();
-      if (mounted) setAuthenticated(status.isAuthenticated, status.token, status.user);
+      console.log('[RootNavigator] Initial session restore starting...');
+      try {
+        const status = await authService.checkAuthStatus();
+        console.log('[RootNavigator] Session restore result:', status);
+        if (mounted) {
+          setAuthenticated(status.isAuthenticated, status.token, status.user);
+        }
+      } catch (error) {
+        console.error('[RootNavigator] Session restore failed:', error);
+        if (mounted) {
+          setInitializing(false);
+        }
+      }
     };
     restore();
 
     return () => {
       mounted = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [setAuthenticated, setInitializing]);
 
   // React Navigation Theme linked to app theme tokens
   const navigationTheme: NavTheme = useMemo(() => {
@@ -53,7 +61,7 @@ export const RootNavigator: React.FC = () => {
     };
   }, [colors, isDark]);
 
-  if (isLoading) {
+  if (isInitializing) {
     return <Loader message="Restoring session..." />;
   }
 

@@ -98,54 +98,38 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   // ── State ──────────────────────────────────────────────────────────────────
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [chromeVisible, setChromeVisible] = useState(false); // starts hidden
+  const [prevVisible, setPrevVisible] = useState(visible);
+  const [prevInitialIndex, setPrevInitialIndex] = useState(initialIndex);
 
-  // ── Animation refs ─────────────────────────────────────────────────────────
+  if (visible !== prevVisible || initialIndex !== prevInitialIndex) {
+    setPrevVisible(visible);
+    setPrevInitialIndex(initialIndex);
+    if (visible) {
+      const safeIndex = Math.max(0, Math.min(initialIndex, photos.length - 1));
+      setCurrentIndex(safeIndex);
+      setChromeVisible(false);
+    }
+  }
+
+  // ── Animation values ─────────────────────────────────────────────────────────
   /** Bottom chrome (filmstrip + dock) slides up/down from the bottom edge */
-  const bottomSlideY = useRef(new Animated.Value(BOTTOM_CHROME_HEIGHT)).current;
+  const bottomSlideY = useMemo(() => new Animated.Value(BOTTOM_CHROME_HEIGHT), []);
   /** Top header fades in/out in sync with the bottom chrome */
-  const headerOpacity = useRef(new Animated.Value(0)).current;
+  const headerOpacity = useMemo(() => new Animated.Value(0), []);
   /** Whole viewer dismiss (swipe down) */
-  const dismissTranslateY = useRef(new Animated.Value(0)).current;
-  const dismissOpacity = useRef(new Animated.Value(1)).current;
+  const dismissTranslateY = useMemo(() => new Animated.Value(0), []);
+  const dismissOpacity = useMemo(() => new Animated.Value(1), []);
 
-  // ── Zoom / pan refs ────────────────────────────────────────────────────────
-  const scale = useRef(new Animated.Value(1)).current;
-  const panX = useRef(new Animated.Value(0)).current;
-  const panY = useRef(new Animated.Value(0)).current;
+  // ── Zoom / pan animation values ─────────────────────────────────────────────
+  const scale = useMemo(() => new Animated.Value(1), []);
+  const panX = useMemo(() => new Animated.Value(0), []);
+  const panY = useMemo(() => new Animated.Value(0), []);
   const currentScale = useRef(1);
   const currentPanX = useRef(0);
   const currentPanY = useRef(0);
 
   const filmstripRef = useRef<FlatList>(null);
   const lastTapRef = useRef<number>(0);
-
-  // ── Sync when viewer opens ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (visible) {
-      const safeIndex = Math.max(0, Math.min(initialIndex, photos.length - 1));
-      setCurrentIndex(safeIndex);
-      setChromeVisible(false);
-      // Reset all animations
-      bottomSlideY.setValue(BOTTOM_CHROME_HEIGHT);
-      headerOpacity.setValue(0);
-      dismissTranslateY.setValue(0);
-      dismissOpacity.setValue(1);
-      resetZoom();
-    }
-  }, [visible, initialIndex, photos.length]);
-
-  // ── Scroll filmstrip to keep active photo centred ──────────────────────────
-  useEffect(() => {
-    if (visible && filmstripRef.current && photos.length > 0) {
-      try {
-        filmstripRef.current.scrollToIndex({
-          index: Math.max(0, Math.min(currentIndex, photos.length - 1)),
-          animated: true,
-          viewPosition: 0.5,
-        });
-      } catch {}
-    }
-  }, [currentIndex, visible, photos.length]);
 
   const currentPhoto = photos[currentIndex] || photos[0];
 
@@ -160,6 +144,30 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
       Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
     ]).start();
   }, [scale, panX, panY]);
+
+  // ── Reset animations when viewer opens ─────────────────────────────────────
+  useEffect(() => {
+    if (visible) {
+      bottomSlideY.setValue(BOTTOM_CHROME_HEIGHT);
+      headerOpacity.setValue(0);
+      dismissTranslateY.setValue(0);
+      dismissOpacity.setValue(1);
+      resetZoom();
+    }
+  }, [visible, bottomSlideY, headerOpacity, dismissTranslateY, dismissOpacity, resetZoom]);
+
+  // ── Scroll filmstrip to keep active photo centred ──────────────────────────
+  useEffect(() => {
+    if (visible && filmstripRef.current && photos.length > 0) {
+      try {
+        filmstripRef.current.scrollToIndex({
+          index: Math.max(0, Math.min(currentIndex, photos.length - 1)),
+          animated: true,
+          viewPosition: 0.5,
+        });
+      } catch {}
+    }
+  }, [currentIndex, visible, photos.length]);
 
   /** Show/hide the chrome with a spring bounce-up from the bottom */
   const toggleChrome = useCallback(() => {
@@ -262,93 +270,113 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
     );
   }, [currentPhoto, onDeletePhoto, photos.length, currentIndex, onClose]);
 
-  // ── PanResponder ───────────────────────────────────────────────────────────
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: (_, g) => {
-          if (g.numberActiveTouches >= 2) return true;
-          if (currentScale.current > 1) return true;
-          return Math.abs(g.dx) > 8 || Math.abs(g.dy) > 8;
-        },
-        onPanResponderMove: (evt, g) => {
-          // Pinch-to-zoom
-          if (g.numberActiveTouches >= 2 && evt.nativeEvent.touches?.length >= 2) {
-            const t1 = evt.nativeEvent.touches[0];
-            const t2 = evt.nativeEvent.touches[1];
-            const dist = Math.hypot(t1.pageX - t2.pageX, t1.pageY - t2.pageY);
-            const ns = Math.max(1, Math.min(dist / 160, 3.5));
-            currentScale.current = ns;
-            scale.setValue(ns);
-            return;
-          }
-          // Pan when zoomed
-          if (currentScale.current > 1) {
-            const mX = (SCREEN_WIDTH * (currentScale.current - 1)) / 2;
-            const mY = (SCREEN_HEIGHT * (currentScale.current - 1)) / 2;
-            panX.setValue(Math.max(-mX, Math.min(currentPanX.current + g.dx, mX)));
-            panY.setValue(Math.max(-mY, Math.min(currentPanY.current + g.dy, mY)));
-            return;
-          }
-          // Swipe-down dismiss feedback
-          if (g.dy > 0 && Math.abs(g.dy) > Math.abs(g.dx)) {
-            dismissTranslateY.setValue(g.dy);
-            dismissOpacity.setValue(Math.max(0.3, 1 - g.dy / (SCREEN_HEIGHT * 0.6)));
-          }
-        },
-        onPanResponderRelease: (_, g) => {
-          const now = Date.now();
-          // Tap (no significant movement)
-          if (Math.abs(g.dx) < 10 && Math.abs(g.dy) < 10) {
-            if (now - lastTapRef.current < 280) {
-              // Double-tap
-              lastTapRef.current = 0;
-              handleDoubleTap();
-            } else {
-              // Single-tap → toggle chrome
-              lastTapRef.current = now;
-              setTimeout(() => {
-                if (lastTapRef.current === now) {
-                  toggleChrome();
-                }
-              }, 290);
-            }
-            return;
-          }
-          // Zoomed pan release – commit offset
-          if (currentScale.current > 1) {
-            currentPanX.current += g.dx;
-            currentPanY.current += g.dy;
-            return;
-          }
-          // Swipe-down dismiss
-          if (g.dy > 120 || (g.dy > 40 && g.vy > 0.6)) {
-            handleDismiss();
-            return;
-          } else if (g.dy > 0) {
-            Animated.parallel([
-              Animated.spring(dismissTranslateY, { toValue: 0, useNativeDriver: true }),
-              Animated.spring(dismissOpacity, { toValue: 1, useNativeDriver: true }),
-            ]).start();
-          }
-          // Horizontal swipe
-          if (Math.abs(g.dx) > 55 || Math.abs(g.vx) > 0.45) {
-            if (g.dx > 0) handlePrevPhoto();
-            else handleNextPhoto();
-          }
-        },
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
+  // ── Handlers ref to keep PanResponder stable ────────────────────────────────
+  const handlersRef = useRef({
+    currentIndex,
+    photos,
+    handleDoubleTap,
+    toggleChrome,
+    handleDismiss,
+    handlePrevPhoto,
+    handleNextPhoto,
+  });
+  useEffect(() => {
+    handlersRef.current = {
       currentIndex,
-      photos.length,
+      photos,
       handleDoubleTap,
       toggleChrome,
       handleDismiss,
       handlePrevPhoto,
       handleNextPhoto,
-    ],
+    };
+  }, [
+    currentIndex,
+    photos,
+    handleDoubleTap,
+    toggleChrome,
+    handleDismiss,
+    handlePrevPhoto,
+    handleNextPhoto,
+  ]);
+
+  // ── PanResponder (Created once) ─────────────────────────────────────────────
+  // eslint-disable-next-line react-hooks/refs
+  const [panResponder] = useState(() =>
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => {
+        if (g.numberActiveTouches >= 2) return true;
+        if (currentScale.current > 1) return true;
+        return Math.abs(g.dx) > 8 || Math.abs(g.dy) > 8;
+      },
+      onPanResponderMove: (evt, g) => {
+        // Pinch-to-zoom
+        if (g.numberActiveTouches >= 2 && evt.nativeEvent.touches?.length >= 2) {
+          const t1 = evt.nativeEvent.touches[0];
+          const t2 = evt.nativeEvent.touches[1];
+          const dist = Math.hypot(t1.pageX - t2.pageX, t1.pageY - t2.pageY);
+          const ns = Math.max(1, Math.min(dist / 160, 3.5));
+          currentScale.current = ns;
+          scale.setValue(ns);
+          return;
+        }
+        // Pan when zoomed
+        if (currentScale.current > 1) {
+          const mX = (SCREEN_WIDTH * (currentScale.current - 1)) / 2;
+          const mY = (SCREEN_HEIGHT * (currentScale.current - 1)) / 2;
+          panX.setValue(Math.max(-mX, Math.min(currentPanX.current + g.dx, mX)));
+          panY.setValue(Math.max(-mY, Math.min(currentPanY.current + g.dy, mY)));
+          return;
+        }
+        // Swipe-down dismiss feedback
+        if (g.dy > 0 && Math.abs(g.dy) > Math.abs(g.dx)) {
+          dismissTranslateY.setValue(g.dy);
+          dismissOpacity.setValue(Math.max(0.3, 1 - g.dy / (SCREEN_HEIGHT * 0.6)));
+        }
+      },
+      onPanResponderRelease: (_, g) => {
+        const now = Date.now();
+        // Tap (no significant movement)
+        if (Math.abs(g.dx) < 10 && Math.abs(g.dy) < 10) {
+          if (now - lastTapRef.current < 280) {
+            // Double-tap
+            lastTapRef.current = 0;
+            handlersRef.current.handleDoubleTap();
+          } else {
+            // Single-tap → toggle chrome
+            lastTapRef.current = now;
+            setTimeout(() => {
+              if (lastTapRef.current === now) {
+                handlersRef.current.toggleChrome();
+              }
+            }, 290);
+          }
+          return;
+        }
+        // Zoomed pan release – commit offset
+        if (currentScale.current > 1) {
+          currentPanX.current += g.dx;
+          currentPanY.current += g.dy;
+          return;
+        }
+        // Swipe-down dismiss
+        if (g.dy > 120 || (g.dy > 40 && g.vy > 0.6)) {
+          handlersRef.current.handleDismiss();
+          return;
+        } else if (g.dy > 0) {
+          Animated.parallel([
+            Animated.spring(dismissTranslateY, { toValue: 0, useNativeDriver: true }),
+            Animated.spring(dismissOpacity, { toValue: 1, useNativeDriver: true }),
+          ]).start();
+        }
+        // Horizontal swipe
+        if (Math.abs(g.dx) > 55 || Math.abs(g.vx) > 0.45) {
+          if (g.dx > 0) handlersRef.current.handlePrevPhoto();
+          else handlersRef.current.handleNextPhoto();
+        }
+      },
+    }),
   );
 
   // ── Early exit ─────────────────────────────────────────────────────────────

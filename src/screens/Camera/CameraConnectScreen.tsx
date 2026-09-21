@@ -5,7 +5,6 @@ import {
   Image,
   TouchableOpacity,
   Pressable,
-  StatusBar,
   ScrollView,
   Animated,
   Platform,
@@ -13,7 +12,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Path, Circle, Defs, RadialGradient, Stop, Polygon } from 'react-native-svg';
+import Svg, { Path, Polygon } from 'react-native-svg';
 import {
   ArrowLeft,
   Calendar,
@@ -232,7 +231,7 @@ export const CameraConnectScreen: React.FC = () => {
             </View>
 
             <Text style={[styles.heroSubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-              Connect your camera and we'll find your latest photos.
+              Connect your camera and we&apos;ll find your latest photos.
             </Text>
           </View>
 
@@ -707,8 +706,8 @@ export const CameraConnectScreen: React.FC = () => {
                   <Text
                     style={[styles.helpGuideRowDesc, { color: isDark ? '#A1A1AA' : '#7A7571' }]}
                   >
-                    Turn on camera Wi-Fi / Smartphone Transfer in your camera's Network settings
-                    menu.
+                    Turn on camera Wi-Fi / Smartphone Transfer in your camera&apos;s Network
+                    settings menu.
                   </Text>
                 </View>
               </View>
@@ -728,8 +727,8 @@ export const CameraConnectScreen: React.FC = () => {
                   <Text
                     style={[styles.helpGuideRowDesc, { color: isDark ? '#A1A1AA' : '#7A7571' }]}
                   >
-                    Connect via OTG cable. Ensure USB Connection mode is set to 'MTP' or 'Mass
-                    Storage / PTP'.
+                    Connect via OTG cable. Ensure USB Connection mode is set to &apos;MTP&apos; or
+                    &apos;Mass Storage / PTP&apos;.
                   </Text>
                 </View>
               </View>

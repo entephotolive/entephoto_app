@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -6,11 +6,10 @@ import {
   TouchableOpacity,
   Pressable,
   ScrollView,
-  Platform,
   Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Path, Circle, Polygon, Line } from 'react-native-svg';
+import Svg, { Circle, Polygon, Line } from 'react-native-svg';
 import {
   ArrowLeft,
   Calendar,
@@ -201,7 +200,7 @@ export const CameraConnectedScreen: React.FC = () => {
             </View>
 
             <Text style={[styles.heroSubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-              Your camera is ready. Let's capture some amazing memories.
+              Your camera is ready. Let&apos;s capture some amazing memories.
             </Text>
           </View>
 

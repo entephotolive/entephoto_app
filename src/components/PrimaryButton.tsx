@@ -8,7 +8,6 @@ import {
   StyleProp,
   ActivityIndicator,
   View,
-  Platform,
 } from 'react-native';
 import { COLORS, RADII, SPACING } from '@/constants/theme';
 import { TYPOGRAPHY } from '@/constants/typography';
