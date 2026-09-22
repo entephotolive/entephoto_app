@@ -34,7 +34,7 @@ import {
   deleteLocalPhoto,
   CANONICAL_DCIM_DIR_URI,
 } from '@/services/localPhotoService';
-import { uploadSinglePhoto } from '@/services/photoUploadService';
+import { uploadSinglePhoto, isValidObjectId } from '@/services/photoUploadService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
 
@@ -343,10 +343,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
-    if (!eventId) {
+    if (!eventId || !isValidObjectId(eventId)) {
       Alert.alert(
-        'Event Not Specified',
-        'No event ID is associated with this session. Please select a valid event first.',
+        'Invalid Event ID',
+        'No valid 24-character hex event ID is associated with this session. Please select a valid event first.',
       );
       return;
     }
@@ -366,6 +366,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             const total = batchToUpload.length;
             let successCount = 0;
             let failCount = 0;
+            const failReasons: string[] = [];
 
             setUploadProgress({ current: 0, total });
 
@@ -390,10 +391,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                   ),
                 );
               } catch (err: any) {
-                console.error(
-                  `[PhotoGallery] Upload error for ${photo.filename}:`,
-                  err?.response?.data || err?.message || err,
-                );
+                const errorMsg = err?.message || 'Upload failed';
+                console.error(`[PhotoGallery] Upload error for ${photo.filename}:`, errorMsg);
+                failReasons.push(`${photo.filename}: ${errorMsg}`);
                 failCount++;
               } finally {
                 setUploadingPhotoIds(prev => {
@@ -413,9 +413,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 `Successfully uploaded all ${successCount} photos to "${eventTitle}".`,
               );
             } else {
+              const reasonsSample = failReasons.slice(0, 3).join('\n• ');
+              const moreText =
+                failReasons.length > 3 ? `\n...and ${failReasons.length - 3} more.` : '';
               Alert.alert(
                 'Upload Finished ⚠️',
-                `Uploaded: ${successCount}\nFailed: ${failCount}\n\nYou can retry uploading any remaining marked photos.`,
+                `Uploaded: ${successCount}\nFailed: ${failCount}\n\nIssues:\n• ${reasonsSample}${moreText}\n\nYou can retry uploading any remaining marked photos.`,
               );
             }
           },
@@ -439,8 +442,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // Upload Single Photo
   const handleUploadSinglePhoto = useCallback(
     async (photo: GalleryPhotoItem) => {
-      if (!eventId) {
-        Alert.alert('Event Not Specified', 'No active event ID available for upload.');
+      if (!eventId || !isValidObjectId(eventId)) {
+        Alert.alert('Invalid Event ID', 'No valid 24-character event ID available for upload.');
         return;
       }
       setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
@@ -461,12 +464,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         console.error(`[PhotoGallery] Failed to upload ${photo.filename}:`, err);
         Alert.alert(
           'Upload Failed',
-          `Could not upload ${photo.filename || 'photo'}: ${
-            err?.response?.data?.error ||
-            err?.response?.data?.details ||
-            err?.message ||
-            'Network error'
-          }`,
+          `Could not upload ${photo.filename || 'photo'}:\n${err?.message || 'Network error'}`,
         );
       } finally {
         setUploadingPhotoIds(prev => {

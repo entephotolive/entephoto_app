@@ -12,6 +12,23 @@ export const apiClient: AxiosInstance = axios.create({
   },
 });
 
+// Multipart fix: when the request body is a FormData object, remove the
+// Content-Type default so the React Native native HTTP bridge can inject the
+// correct `multipart/form-data; boundary=<uuid>` value automatically.
+// Without this, the global `application/json` default persists and either
+// the server rejects it or the native layer fails to set the boundary.
+apiClient.interceptors.request.use(config => {
+  if (config.data instanceof FormData) {
+    // Delete via the AxiosHeaders API (Axios 1.x) and the plain object path
+    if (typeof config.headers?.delete === 'function') {
+      config.headers.delete('Content-Type');
+    } else if (config.headers) {
+      delete (config.headers as Record<string, unknown>)['Content-Type'];
+    }
+  }
+  return config;
+});
+
 interface CustomAxiosRequestConfig extends InternalAxiosRequestConfig {
   _retry?: boolean;
 }
