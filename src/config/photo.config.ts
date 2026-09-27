@@ -62,9 +62,3 @@ const rawAlbumName = process.env.EXPO_PUBLIC_PHOTO_ALBUM_NAME;
 export const PHOTO_STORAGE_DIR_URI = normalizePhotoDirectoryUri(rawPhotoPath);
 export const PHOTO_STORAGE_DISPLAY_PATH = getDisplayPath(PHOTO_STORAGE_DIR_URI);
 export const PHOTO_ALBUM_NAME = extractAlbumName(PHOTO_STORAGE_DIR_URI, rawAlbumName);
-
-export const PHOTO_CONFIG = {
-  storageDirUri: PHOTO_STORAGE_DIR_URI,
-  displayPath: PHOTO_STORAGE_DISPLAY_PATH,
-  albumName: PHOTO_ALBUM_NAME,
-} as const;

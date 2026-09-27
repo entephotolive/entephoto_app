@@ -122,21 +122,3 @@ export async function saveQualityResult(
   // Non-blocking disk write — pipeline is not delayed by I/O
   flushToDisk().catch(() => {});
 }
-
-/**
- * Clears all persisted quality results from both memory and disk.
- *
- * Useful if quality thresholds (BLUR_THRESHOLD, EXPOSURE_THRESHOLD) change
- * and all photos need to be re-analysed on the next app launch.
- */
-export async function clearAllQualityResults(): Promise<void> {
-  memoryCache.clear();
-  isLoaded = false;
-  loadPromise = null;
-  try {
-    await FileSystem.deleteAsync(QUALITY_CACHE_PATH, { idempotent: true });
-    console.log('[QualityPersistence] All cached quality results cleared.');
-  } catch (err) {
-    console.warn('[QualityPersistence] Failed to clear disk cache:', err);
-  }
-}

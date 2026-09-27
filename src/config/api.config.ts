@@ -27,5 +27,3 @@ export const API_ENDPOINTS = {
     HEALTH: '/health/',
   },
 } as const;
-
-export const GOOGLE_AUTH_API_URL = `${ENV.API_BASE_URL}${API_ENDPOINTS.AUTH.GOOGLE_SIGN_IN}`;

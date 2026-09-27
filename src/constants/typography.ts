@@ -10,4 +10,4 @@
 // Prefer importing from '@/constants/theme' in new code.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export { FONTS, TYPOGRAPHY, typography, TypographyVariant } from './theme/typography';
+export { FONTS, TYPOGRAPHY } from './theme/typography';

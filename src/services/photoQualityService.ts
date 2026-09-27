@@ -83,14 +83,8 @@ export const BLUR_THRESHOLD = 100.0;
 /**
  * HIGH_LUMINANCE_CLIPPING_VALUE: Pixel brightness threshold on a 0-255 scale representing clipped highlights.
  */
-export const HIGH_LUMINANCE_CLIPPING_VALUE = 250;
+const HIGH_LUMINANCE_CLIPPING_VALUE = 250;
 
-/**
- * EXPOSURE_THRESHOLD: Percentage of clipped highlight pixels (0-100%) above which an image is marked overexposed.
- * NOTE: A white wedding dress, bright backdrop wall, or direct flash reflection can legitimately
- * produce many bright pixels without the entire photo being ruined. This threshold needs real-photo
- * calibration (Step 8), rather than a naive "any white pixels = bad" rule.
- */
 export const EXPOSURE_THRESHOLD = 12.0;
 
 /**
@@ -105,9 +99,7 @@ export const EXPOSURE_THRESHOLD = 12.0;
  * - Mid-tier (3.5 GB – 5.5 GB RAM): concurrency = 3
  * - High-end (>= 5.5 GB RAM): concurrency = 4
  */
-let _concurrencyOverride: number | null = null;
-
-export function getAdaptiveConcurrency(): number {
+function getAdaptiveConcurrency(): number {
   try {
     const totalMem = Device.totalMemory;
     if (typeof totalMem === 'number' && totalMem > 0) {
@@ -126,18 +118,9 @@ export function getAdaptiveConcurrency(): number {
   return 3;
 }
 
-export function setConcurrencyOverride(limit: number | null): void {
-  _concurrencyOverride = limit;
-}
-
-export function getMaxConcurrentAnalyses(): number {
-  if (_concurrencyOverride !== null && _concurrencyOverride > 0) {
-    return _concurrencyOverride;
-  }
+function getMaxConcurrentAnalyses(): number {
   return getAdaptiveConcurrency();
 }
-
-export const MAX_CONCURRENT_ANALYSES = getMaxConcurrentAnalyses();
 
 // Standard ITU-R BT.709 luminance coefficients matrix for converting RGB to Grayscale
 const GRAYSCALE_COLOR_MATRIX = [
@@ -284,7 +267,7 @@ async function detectFacesAndEyes(imageUri: string): Promise<{
  * 4. For each of the 8 rows, compares pixel(x, y) > pixel(x+1, y) to produce 8 bits per row (64 bits total).
  * 5. Returns a 16-character hexadecimal string representation (e.g. "a3f501c890e4bb21").
  */
-export function computeDHashFromSkImage(skImage: SkImage): string | null {
+function computeDHashFromSkImage(skImage: SkImage): string | null {
   let smallSurface: SkSurface | null = null;
   let smallSnapshot: SkImage | null = null;
 
@@ -757,12 +740,4 @@ export function analyzePhoto(
     analysisQueue.push({ photoUri, photoName, onHashReady, resolve, reject });
     processQueue();
   });
-}
-
-/**
- * Returns the current session-level timing summary.
- * Call from dev tooling or an in-app debug panel to inspect cumulative perf data.
- */
-export function getPerfSummary(): typeof _perfAccum {
-  return { ..._perfAccum };
 }

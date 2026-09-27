@@ -11,7 +11,7 @@ import {
 
 // ── Canonical Photo Directory on Android (synced with env) ────────────────────
 export const CANONICAL_DCIM_DIR_URI = PHOTO_STORAGE_DIR_URI;
-export { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH, PHOTO_ALBUM_NAME };
+export { PHOTO_STORAGE_DISPLAY_PATH };
 
 // Supported Image Extensions
 const SUPPORTED_EXTENSIONS = [

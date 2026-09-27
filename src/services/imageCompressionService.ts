@@ -18,19 +18,15 @@ export interface CompressionResult {
 
 // ── Compression Configuration ──────────────────────────────────────────────
 
-/**
- * Files at or below this size (4 MB) are skipped — they are already upload-ready
- * and re-encoding them would only waste CPU and reduce quality needlessly.
- */
-export const SKIP_COMPRESSION_BYTES = 4 * 1024 * 1024; // 4 MB gate
+const SKIP_COMPRESSION_BYTES = 4 * 1024 * 1024; // 4 MB gate
 
 /**
  * Target output range: stop as soon as the result lands ANYWHERE in [2 MB, 3 MB].
  * This prevents over-compressing a file that hit 2.9 MB early when a lower-quality
  * pass reaching 2.0 MB would have been unnecessary.
  */
-export const TARGET_MIN_BYTES = 2 * 1024 * 1024; // 2 MB floor of acceptable range
-export const TARGET_MAX_BYTES = 3 * 1024 * 1024; // 3 MB ceiling of acceptable range
+const TARGET_MIN_BYTES = 2 * 1024 * 1024; // 2 MB floor of acceptable range
+const TARGET_MAX_BYTES = 3 * 1024 * 1024; // 3 MB ceiling of acceptable range
 
 /** Legacy single constant kept for call-sites that pass targetBytes directly */
 export const TARGET_UPLOAD_BYTES = TARGET_MAX_BYTES;
@@ -63,7 +59,7 @@ function getImageDimensions(uri: string): Promise<{ width: number; height: numbe
  * Gets file size in bytes via expo-file-system's FileSystem.getInfoAsync,
  * which works on both file:// URIs and content:// URIs (Android MediaStore).
  */
-export async function getFileSizeBytes(fileUri: string): Promise<number> {
+async function getFileSizeBytes(fileUri: string): Promise<number> {
   try {
     const info = await FileSystem.getInfoAsync(fileUri);
     if (info.exists && 'size' in info) {
@@ -80,7 +76,7 @@ export async function getFileSizeBytes(fileUri: string): Promise<number> {
  * Synchronous size helper for already-local file:// URIs using the File class.
  * Kept for places that cannot await (e.g. inside sync helpers).
  */
-export function getFileSizeInBytes(fileUri: string): number {
+function getFileSizeInBytes(fileUri: string): number {
   try {
     const rawUri = fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`;
     const file = new File(rawUri);
@@ -104,60 +100,6 @@ export async function cleanupTempFile(fileUri: string): Promise<void> {
   } catch (err) {
     console.warn('[ImageCompression] Failed to delete temp file:', fileUri, err);
   }
-}
-
-/**
- * Copies a compressed JPEG from a temporary/cache path to a persistent location
- * under `FileSystem.documentDirectory/ente_compressed/{eventId}/{photoId}.jpg`.
- *
- * After copying:
- *  - Verifies the file exists at the destination and its size is > 0.
- *  - Deletes the source temp file.
- *
- * Returns the persistent URI, or throws on any failure so the caller can decide
- * whether to keep the original file.
- */
-export async function persistCompressedFile(
-  tempUri: string,
-  eventId: string,
-  photoId: string,
-): Promise<{ persistentUri: string; persistentSizeBytes: number }> {
-  // Sanitize IDs so they are safe as path components
-  const safeEventId = eventId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'event';
-  const safePhotoId = photoId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'photo';
-
-  const dirPath = `${FileSystem.documentDirectory}ente_compressed/${safeEventId}/`;
-  const destUri = `${dirPath}${safePhotoId}.jpg`;
-
-  // Ensure destination directory exists (idempotent)
-  await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
-
-  // Copy temp file → persistent destination
-  await FileSystem.copyAsync({ from: tempUri, to: destUri });
-
-  // Verify destination
-  const destInfo = await FileSystem.getInfoAsync(destUri);
-  if (!destInfo.exists) {
-    throw new Error(`[ImageCompression] Persist failed: file not found at ${destUri}`);
-  }
-  const persistentSizeBytes = (destInfo as any).size ?? 0;
-  if (persistentSizeBytes === 0) {
-    throw new Error(`[ImageCompression] Persist failed: zero-byte file at ${destUri}`);
-  }
-
-  // Delete the temp source now that the persistent copy is confirmed
-  try {
-    await FileSystem.deleteAsync(tempUri, { idempotent: true });
-  } catch (cleanErr) {
-    // Non-fatal: the persistent file is good, just warn about the leftover temp
-    console.warn('[ImageCompression] Could not delete temp file after persist:', tempUri, cleanErr);
-  }
-
-  console.log(
-    `[ImageCompression] Persisted: ${tempUri} → ${destUri} (${(persistentSizeBytes / (1024 * 1024)).toFixed(2)} MB)`,
-  );
-
-  return { persistentUri: destUri, persistentSizeBytes };
 }
 
 // ── Core compression function ──────────────────────────────────────────────

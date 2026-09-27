@@ -58,7 +58,7 @@ const SparkleStar: React.FC<{ size?: number; color?: string }> = ({
   color = '#3B82F6',
 }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24">
-    <Path d="M12 0L14.8 9.2L24 12L14.8 14.8L12 24L9.2 14.8L0 12L9.2 9.2L12 0Z" fill="#121316" />
+    <Path d="M12 0L14.8 9.2L24 12L14.8 14.8L12 24L9.2 14.8L0 12L9.2 9.2L12 0Z" fill={color} />
   </Svg>
 );
 

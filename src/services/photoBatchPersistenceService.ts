@@ -195,27 +195,6 @@ async function flushToDisk(): Promise<void> {
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 /**
- * Returns the persisted batch that contains the given stable photo ID, or null
- * if this photo has not been assigned to any batch yet.
- *
- * @param stablePhotoId - Camera filename (e.g. "IMG_2048.JPG")
- */
-export async function getBatchForPhoto(stablePhotoId: string): Promise<PersistedBatch | null> {
-  await ensureLoaded();
-  const batchId = batchIdByPhotoId.get(stablePhotoId);
-  if (!batchId) return null;
-  return batchById.get(batchId) ?? null;
-}
-
-/**
- * Returns the persisted batch by its ID, or null if not found.
- */
-export async function getBatchById(batchId: string): Promise<PersistedBatch | null> {
-  await ensureLoaded();
-  return batchById.get(batchId) ?? null;
-}
-
-/**
  * Returns the "last open batch" from the previous session — the batch whose
  * `endTime` is most recent. Used by the batching algorithm to check whether
  * the very first new photo in this session should continue that batch.
@@ -239,39 +218,6 @@ export async function getLastOpenBatch(): Promise<PersistedBatch | null> {
 export async function getUnassignedPhotoIds(stablePhotoIds: string[]): Promise<string[]> {
   await ensureLoaded();
   return stablePhotoIds.filter(id => !batchIdByPhotoId.has(id));
-}
-
-/**
- * Persists a newly created batch and its photo assignments.
- *
- * Writes to in-memory maps immediately, then flushes to disk asynchronously.
- * Safe to call concurrently — the in-memory write is synchronous; only disk I/O
- * is deferred.
- *
- * ⚠️ Do NOT call this for photos already in a persisted batch — it will
- * overwrite their assignment, violating the no-retroactive-re-batching rule.
- * Use `appendPhotoToBatch` for adding to an existing open batch instead.
- *
- * @param batch - The new PersistedBatch to save
- * @param markAsLastOpen - If true, records this batch as the "current open batch"
- *                         so the next session's first new photo can be compared to it
- */
-export async function saveNewBatch(
-  batch: PersistedBatch,
-  markAsLastOpen: boolean = false,
-): Promise<void> {
-  await ensureLoaded();
-
-  batchById.set(batch.id, batch);
-  for (const photoId of batch.photoIds) {
-    batchIdByPhotoId.set(photoId, batch.id);
-  }
-
-  if (markAsLastOpen) {
-    lastOpenBatchId = batch.id;
-  }
-
-  scheduleFlush();
 }
 
 /**
@@ -325,34 +271,6 @@ export async function appendPhotoToBatch(
 }
 
 /**
- * Updates the bestShotPhotoId for a persisted batch.
- */
-export async function updateBatchBestShot(
-  batchId: string,
-  bestShotPhotoId: string | null,
-): Promise<void> {
-  await ensureLoaded();
-  const existing = batchById.get(batchId);
-  if (!existing) return;
-  existing.bestShotPhotoId = bestShotPhotoId;
-  scheduleFlush();
-}
-
-/**
- * Closes the "last open batch" reference — called at the end of a session's
- * batch assignment run. Future sessions will NOT continue into the closed batch;
- * their first new photo will always open a new batch.
- *
- * NOTE: This does NOT mutate the batch itself — it only clears the `lastOpenBatchId`
- * pointer. The batch's data (photoIds, endTime) remains intact.
- */
-export async function closeLastOpenBatch(): Promise<void> {
-  await ensureLoaded();
-  lastOpenBatchId = null;
-  flushToDisk().catch(() => {});
-}
-
-/**
  * Saves multiple new batches in one call (used after running the sequential
  * algorithm over a full set of new photos). The last batch in the array is
  * treated as the "current open batch" for the next session.
@@ -388,53 +306,6 @@ export async function getAllPersistedBatches(): Promise<PersistedBatch[]> {
   await ensureLoaded();
   const all = Array.from(batchById.values());
   return all.sort((a, b) => a.startTime.localeCompare(b.startTime));
-}
-
-/**
- * Backfills representative hash/faceCount data for a single provisional batch
- * once its first photo's real analysis results are available.
- *
- * This is the ONLY mutation allowed on a closed batch and ONLY when:
- *  - `batch.provisional === true`, AND
- *  - `batch.representativeHash` is null/undefined
- *
- * After repair the `provisional` flag is cleared, locking the batch again.
- *
- * @param batchId              - ID of the batch to repair
- * @param representativeHash   - Real dHash of the batch's first photo
- * @param representativeFaceCount - Real face count of the batch's first photo
- * @param lastPhotoHash        - Real dHash of the batch's most-recent photo
- *                               (pass the same as representativeHash for single-photo batches)
- */
-export async function updateBatchRepresentativeSignature(
-  batchId: string,
-  representativeHash: string | null,
-  representativeFaceCount: number | null,
-  lastPhotoHash: string | null,
-): Promise<void> {
-  await ensureLoaded();
-
-  const batch = batchById.get(batchId);
-  if (!batch) {
-    console.warn(
-      `[BatchPersistence] updateBatchRepresentativeSignature: batch ${batchId} not found`,
-    );
-    return;
-  }
-  if (!batch.provisional) {
-    // Already repaired or never provisional — immutability rule: no-op
-    return;
-  }
-
-  batch.representativeHash = representativeHash;
-  batch.representativeFaceCount = representativeFaceCount;
-  batch.lastPhotoHash = lastPhotoHash;
-  batch.provisional = false;
-
-  scheduleFlush();
-  console.log(
-    `[BatchPersistence] Repaired provisional batch ${batchId}: hash=${representativeHash}, faces=${representativeFaceCount}`,
-  );
 }
 
 /**
@@ -524,22 +395,4 @@ export function hasProvisionalBatches(): boolean {
     }
   }
   return false;
-}
-
-/**
- * Clears all persisted batch data from memory and disk.
- * Use only during development/testing or if the app needs a full reset.
- */
-export async function clearAllBatches(): Promise<void> {
-  batchById.clear();
-  batchIdByPhotoId.clear();
-  lastOpenBatchId = null;
-  isLoaded = false;
-  loadPromise = null;
-  try {
-    await FileSystem.deleteAsync(BATCH_CACHE_PATH, { idempotent: true });
-    console.log('[BatchPersistence] All batch data cleared.');
-  } catch (err) {
-    console.warn('[BatchPersistence] Failed to clear disk cache:', err);
-  }
 }

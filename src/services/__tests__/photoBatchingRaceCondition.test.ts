@@ -30,7 +30,6 @@
 import {
   runSequentialAlgorithm,
   MAX_INTRA_BATCH_GAP_MS,
-  FACE_COUNT_TOLERANCE,
   buildGallerySections,
 } from '../photoBatchingService';
 import type { GalleryPhotoItem } from '../../screens/Gallery/PhotoSelectionGalleryScreen';
@@ -328,10 +327,6 @@ describe('Zero-face photos (documented policy)', () => {
 describe('Thresholds are unchanged from validated values', () => {
   test('VISUAL_SIMILARITY_HAMMING_THRESHOLD is 15', () => {
     expect(VISUAL_SIMILARITY_HAMMING_THRESHOLD).toBe(15);
-  });
-
-  test('FACE_COUNT_TOLERANCE is 1', () => {
-    expect(FACE_COUNT_TOLERANCE).toBe(1);
   });
 
   test('MAX_INTRA_BATCH_GAP_MS is 180000ms (3 minutes)', () => {

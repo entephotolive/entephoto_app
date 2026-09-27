@@ -82,19 +82,10 @@ import {
 export const MAX_INTRA_BATCH_GAP_MS = 3 * 60 * 1000; // 3 minutes
 
 /**
- * Maximum allowed difference in detected face counts for two photos to be
- * considered "similar" in terms of their subject group (supporting signal).
- *
- * 0 = strict (must match exactly).
- * 1 = allows minor ML Kit detection variance (one face missed/added). Recommended.
- */
-export const FACE_COUNT_TOLERANCE = 1;
-
-/**
  * Minimum number of photos in a batch for it to be rendered as a labeled
  * "similar" group in the UI. Singletons are always shown ungrouped.
  */
-export const MIN_BATCH_SIZE_FOR_LABEL = 2;
+const MIN_BATCH_SIZE_FOR_LABEL = 2;
 
 // ── Internal Runtime State (computation only — not persisted directly) ─────────
 
@@ -592,7 +583,7 @@ export function buildPhotoBatchesSync(photos: GalleryPhotoItem[]): RuntimeBatch[
  * Formats a batch's start and end timestamps into a clean human time string:
  * e.g. "10:00 AM" or "10:00 AM – 10:03 AM"
  */
-export function formatBatchTimeString(startTimeIso: string, endTimeIso: string): string {
+function formatBatchTimeString(startTimeIso: string, endTimeIso: string): string {
   const startMs = Date.parse(startTimeIso);
   const endMs = Date.parse(endTimeIso);
   if (isNaN(startMs)) return '';
@@ -614,7 +605,7 @@ export function formatBatchTimeString(startTimeIso: string, endTimeIso: string):
  * Returns a human-readable title for a SectionList batch section header:
  * e.g. "10:00 AM – Batch 1 (2 photos)" or "10:00 AM – 10:03 AM · Batch 2 (4 photos)"
  */
-export function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): string {
+function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): string {
   const count = batch.photos.length;
   const photoWord = count === 1 ? 'photo' : 'photos';
   const timeStr = formatBatchTimeString(batch.startTime, batch.endTime);
@@ -633,7 +624,7 @@ export function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): stri
  * Face count has been removed from batch headers to eliminate clutter and reflect
  * pure visual similarity grouping (matching Google Photos / standard gallery apps).
  */
-export function batchSectionSubtitle(_batch: RuntimeBatch): string | null {
+function batchSectionSubtitle(_batch: RuntimeBatch): string | null {
   return null;
 }
 

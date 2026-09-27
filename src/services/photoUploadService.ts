@@ -44,7 +44,7 @@ const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 /**
  * Returns the MIME type based on file extension.
  */
-export function getMimeTypeFromFilename(filename?: string): string {
+function getMimeTypeFromFilename(filename?: string): string {
   if (!filename) return 'image/jpeg';
   const lower = filename.toLowerCase().trim();
   if (lower.endsWith('.png')) return 'image/png';

@@ -18,7 +18,7 @@ import { PhotoQualityResult } from './photoQualityService';
  * As with blur and exposure thresholds, weights can be adjusted based on
  * empirical evaluation against real event photos.
  */
-export const SHOT_SCORE_WEIGHTS = {
+const SHOT_SCORE_WEIGHTS = {
   FACE_DETECTED: 25,
   NOT_BLURRY: 25,
   NOT_OVEREXPOSED: 20,
