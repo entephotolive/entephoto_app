@@ -344,7 +344,7 @@ const IOSNotificationCardComponent: React.FC<IOSNotificationCardProps> = ({
   );
 };
 
-export const IOSNotificationCard = React.memo(
+const IOSNotificationCard = React.memo(
   IOSNotificationCardComponent,
   (prev, next) =>
     prev.event.id === next.event.id &&

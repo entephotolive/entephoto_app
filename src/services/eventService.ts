@@ -22,7 +22,7 @@ export interface EventModel {
  * Compatible with Django DRF PhotographerFoldersAPIView fields:
  * { id, name, slug, photoCount, eventId, createdAt, date, coverImage, ... }
  */
-export const normalizeEvent = (raw: any): EventModel => {
+const normalizeEvent = (raw: any): EventModel => {
   const id =
     raw.id ||
     raw.eventId ||

@@ -118,12 +118,6 @@ export interface RuntimeBatch {
   provisional?: boolean;
 }
 
-/** Row item types for the gallery FlatList (unchanged shape) */
-export type GalleryRow =
-  | { type: 'single'; photo: GalleryPhotoItem; batchId: string }
-  | { type: 'batch_header'; batch: RuntimeBatch }
-  | { type: 'batch_photo'; photo: GalleryPhotoItem; batchId: string; positionInBatch: number };
-
 // ── Internal Helpers ───────────────────────────────────────────────────────────
 
 /**
@@ -549,36 +543,7 @@ export function hydrateBatchesForRender(
   return result;
 }
 
-// ── Gallery Row Flattening ─────────────────────────────────────────────────────
-
-/**
- * Flattens an ordered list of RuntimeBatch objects into GalleryRow items
- * suitable for a FlatList renderItem.
- *
- * Layout rules:
- * - Single-photo batches → type: 'single' (no header, no grouping chrome)
- * - Multi-photo batches → type: 'batch_header' followed by type: 'batch_photo' rows
- */
-export function flattenBatchesToRows(batches: RuntimeBatch[]): GalleryRow[] {
-  const rows: GalleryRow[] = [];
-
-  for (const batch of batches) {
-    if (batch.photos.length < MIN_BATCH_SIZE_FOR_LABEL) {
-      for (const photo of batch.photos) {
-        rows.push({ type: 'single', photo, batchId: batch.id });
-      }
-    } else {
-      rows.push({ type: 'batch_header', batch });
-      batch.photos.forEach((photo, positionInBatch) => {
-        rows.push({ type: 'batch_photo', photo, batchId: batch.id, positionInBatch });
-      });
-    }
-  }
-
-  return rows;
-}
-
-// ── Legacy synchronous path (still exported for transition) ───────────────────
+// ── Synchronous fallback batching ─────────────────────────────────────────────
 
 /**
  * Pure synchronous batch computation from a photo list.
@@ -619,15 +584,6 @@ export function buildPhotoBatchesSync(photos: GalleryPhotoItem[]): RuntimeBatch[
       isOpen: false,
     };
   });
-}
-
-/**
- * Full pipeline (sync): photos → RuntimeBatch[] → GalleryRow[].
- * Use this in useMemo as the fallback before persistence loads.
- */
-export function buildGalleryRows(photos: GalleryPhotoItem[]): GalleryRow[] {
-  const batches = buildPhotoBatchesSync(photos);
-  return flattenBatchesToRows(batches);
 }
 
 // ── Batch Label & Section Helpers ───────────────────────────────────────────
@@ -788,30 +744,6 @@ export function buildGallerySections(
     };
   });
 }
-
-/**
- * Returns a human-readable label for a batch header (backward-compat).
- */
-export function batchHeaderLabel(batch: RuntimeBatch): string {
-  const count = batch.photos.length;
-  const photoWord = count === 1 ? 'photo' : 'photos';
-
-  if (batch.representativeFaceCount === null) {
-    return `${count} similar ${photoWord}`;
-  }
-  if (batch.representativeFaceCount === 0) {
-    return `${count} similar ${photoWord} · No faces`;
-  }
-  const faceWord = batch.representativeFaceCount === 1 ? 'face' : 'faces';
-  return `${count} similar ${photoWord} · ${batch.representativeFaceCount} ${faceWord} detected`;
-}
-
-/**
- * Returns the similarity disclaimer string shown below the batch label.
- * Always displayed to be transparent about ML Kit's limitations.
- */
-export const FACE_COUNT_DISCLAIMER =
-  '⚠️ "Similar" means same detected face count — not verified same people (on-device ML Kit limitation).';
 
 // Re-export core algorithm for simulation and unit testing
 export { runSequentialAlgorithm };

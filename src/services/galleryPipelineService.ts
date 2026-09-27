@@ -104,7 +104,7 @@ let activeCallbacks: PipelineCallbacks | null = null;
 /**
  * Returns true if the background pipeline is actively processing photos.
  */
-export function isPipelineActive(): boolean {
+function isPipelineActive(): boolean {
   return isPipelineRunning;
 }
 
@@ -126,7 +126,7 @@ export function stopGalleryPipeline(): void {
 /**
  * Helper to check if a photo's quality result passes all quality checks.
  */
-export function isPhotoQualityPassing(result: PhotoQualityResult): boolean {
+function isPhotoQualityPassing(result: PhotoQualityResult): boolean {
   const isBlurry = result.blur;
   const isOverExposed = result.overExposure;
   const hasClosedEyes = result.face && !result.eyesOpen;

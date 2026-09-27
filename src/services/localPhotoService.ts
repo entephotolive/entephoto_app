@@ -44,7 +44,7 @@ const RAW_EXTENSIONS = [
 /**
  * Checks if a filename is a supported image file
  */
-export function isPhotoFile(name: string): boolean {
+function isPhotoFile(name: string): boolean {
   const lower = name.toLowerCase();
   return SUPPORTED_EXTENSIONS.some(ext => lower.endsWith(ext));
 }
@@ -52,7 +52,7 @@ export function isPhotoFile(name: string): boolean {
 /**
  * Checks if a filename is a genuine camera RAW format
  */
-export function isRawPhoto(name: string): boolean {
+function isRawPhoto(name: string): boolean {
   const lower = name.toLowerCase();
   return RAW_EXTENSIONS.some(ext => lower.endsWith(ext));
 }
@@ -60,7 +60,7 @@ export function isRawPhoto(name: string): boolean {
 /**
  * Checks if storage permission is already granted without prompting the user.
  */
-export async function checkStoragePermission(): Promise<boolean> {
+async function checkStoragePermission(): Promise<boolean> {
   if (Platform.OS !== 'android') {
     return true;
   }
@@ -86,7 +86,7 @@ export async function checkStoragePermission(): Promise<boolean> {
  * - Android 13+ (API 33+): READ_MEDIA_IMAGES
  * - Android 12 and below (API <= 32): READ_EXTERNAL_STORAGE
  */
-export async function requestStoragePermission(): Promise<boolean> {
+async function requestStoragePermission(): Promise<boolean> {
   if (Platform.OS !== 'android') {
     return true;
   }
