@@ -14,7 +14,11 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.entephoto.app"
+      "bundleIdentifier": "com.entephoto.app",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Allow Ente Photo to access your photos to display and replace gallery images with optimized versions.",
+        "NSPhotoLibraryAddUsageDescription": "Allow Ente Photo to save optimized photos to your photo library."
+      }
     },
     "android": {
       "package": "com.entephoto.app",
@@ -23,7 +27,8 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.ACCESS_MEDIA_LOCATION"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#0B0F1A",
@@ -41,6 +46,14 @@
       "expo-secure-store",
       "expo-font",
       "expo-web-browser",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Ente Photo to access your photos to display and replace gallery images with optimized versions.",
+          "savePhotosPermission": "Allow Ente Photo to save optimized photos to your photo library.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ],
       [
         "expo-splash-screen",
         {

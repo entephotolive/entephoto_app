@@ -2,13 +2,14 @@ import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   View,
   StyleSheet,
-  Image,
   TouchableOpacity,
   Pressable,
   FlatList,
+  SectionList,
   Alert,
   Platform,
   ActivityIndicator,
+  InteractionManager,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -20,8 +21,10 @@ import {
   Cloud,
   Camera,
   RefreshCw,
+  AlertTriangle,
+  Star,
 } from 'lucide-react-native';
-import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
 import { Text } from '@/components/Text';
 import { useTheme } from '@/constants/theme';
@@ -33,25 +36,56 @@ import {
   subscribeToDcimPhotos,
   deleteLocalPhoto,
   CANONICAL_DCIM_DIR_URI,
+  PHOTO_STORAGE_DISPLAY_PATH,
 } from '@/services/localPhotoService';
 import { uploadSinglePhoto, isValidObjectId } from '@/services/photoUploadService';
+import { PhotoQualityResult } from '@/services/photoQualityService';
+import {
+  buildPhotoBatchesSync,
+  RuntimeBatch,
+  GalleryBatchSection,
+  GallerySectionRow,
+  buildGallerySections,
+  assignPhotoBatchesPersisted,
+  hydrateBatchesForRender,
+} from '@/services/photoBatchingService';
+import { getAllPersistedBatches } from '@/services/photoBatchPersistenceService';
+import {
+  runGalleryBackgroundPipeline,
+  stopGalleryPipeline,
+} from '@/services/galleryPipelineService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
+import { PhotoQualityModal } from './components/PhotoQualityModal';
+import { ImageWithSkeleton } from './components/ImageWithSkeleton';
+import { PipelineNotificationStack } from '@/components/PipelineNotificationStack';
 
 export type PhotoStatus = 'new' | 'marked' | 'uploaded';
 
 export interface GalleryPhotoItem {
   id: string;
+  assetId?: string;
   uri: string;
   filename?: string;
   isRaw: boolean;
   status: PhotoStatus;
   selected: boolean;
   timestamp: string;
+  /** Real file modification time (ms since epoch) from Expo FileSystem Directory API */
+  capturedAt?: number;
   aperture?: string;
   iso?: string;
   shutter?: string;
   dimensions?: string;
+  /** Early visual hash computed by Skia (~15ms) before ML Kit finishes */
+  pHash?: string;
+  qualityResult?: PhotoQualityResult;
+  isAnalyzingQuality?: boolean;
+  compressedUri?: string;
+  compressedSizeBytes?: number;
+  isCompressed?: boolean;
+  isCompressing?: boolean;
+  isAutoFavorited?: boolean;
 }
 
 type FilterTab = 'All' | 'New' | 'Marked' | 'Uploaded';
@@ -87,35 +121,122 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   } | null>(null);
   const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
 
+  // Quality analysis & modal state
+  const [selectedQualityPhoto, setSelectedQualityPhoto] = useState<GalleryPhotoItem | null>(null);
+  const [isQualityModalVisible, setIsQualityModalVisible] = useState(false);
+  const isMountedRef = React.useRef(true);
+
+  /**
+   * Persisted batches state.
+   * Initially null (shows sync fallback batches); populated after the async
+   * persistence call completes. Once populated, never reverts to null.
+   */
+  const [persistedBatches, setPersistedBatches] = useState<RuntimeBatch[] | null>(null);
+  /** True while the first persistence load is running (shows no extra spinner — fallback sync batches are used) */
+  const batchLoadedRef = React.useRef(false);
+
+  // Guard pipeline and state against unmounted screen
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopGalleryPipeline();
+    };
+  }, []);
+
+  // Background non-blocking pipeline trigger: yields to main thread after UI animations settle
+  const triggerPipeline = useCallback(
+    (photosToProcess: GalleryPhotoItem[]) => {
+      InteractionManager.runAfterInteractions(() => {
+        if (!isMountedRef.current) return;
+
+        runGalleryBackgroundPipeline(
+          photosToProcess,
+          {
+            onPhotoUpdated: update => {
+              if (!isMountedRef.current) return;
+              setPhotos(prev => prev.map(p => (p.id === update.id ? { ...p, ...update } : p)));
+            },
+            onAutoFavorite: photoId => {
+              if (!isMountedRef.current) return;
+              console.log('[PhotoGallery] Auto-favorited passing photo:', photoId);
+            },
+          },
+          eventId,
+        );
+      });
+    },
+    [eventId],
+  );
+
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
     const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
       setPhotos(prevPhotos => {
         if (prevPhotos.length === 0) {
+          triggerPipeline(dcimPhotos);
           return dcimPhotos;
         }
 
-        // Preserve user's local selections across file scans
-        const statusMap = new Map<string, { selected: boolean; status: PhotoStatus }>();
+        // Preserve user's local selections, quality results, and compression states across scans
+        const statusMap = new Map<
+          string,
+          {
+            selected: boolean;
+            status: PhotoStatus;
+            qualityResult?: PhotoQualityResult;
+            isAnalyzingQuality?: boolean;
+            compressedUri?: string;
+            compressedSizeBytes?: number;
+            isCompressed?: boolean;
+            isCompressing?: boolean;
+            isAutoFavorited?: boolean;
+          }
+        >();
         for (const p of prevPhotos) {
-          statusMap.set(p.id, { selected: p.selected, status: p.status });
-          statusMap.set(p.uri, { selected: p.selected, status: p.status });
+          const entry = {
+            selected: p.selected,
+            status: p.status,
+            qualityResult: p.qualityResult,
+            isAnalyzingQuality: p.isAnalyzingQuality,
+            compressedUri: p.compressedUri,
+            compressedSizeBytes: p.compressedSizeBytes,
+            isCompressed: p.isCompressed,
+            isCompressing: p.isCompressing,
+            isAutoFavorited: p.isAutoFavorited,
+          };
+          statusMap.set(p.id, entry);
+          statusMap.set(p.uri, entry);
         }
 
-        return dcimPhotos.map(item => {
+        const merged = dcimPhotos.map(item => {
           const existing = statusMap.get(item.id) || statusMap.get(item.uri);
           if (existing) {
-            return { ...item, selected: existing.selected, status: existing.status };
+            return {
+              ...item,
+              selected: existing.selected,
+              status: existing.status,
+              qualityResult: existing.qualityResult,
+              isAnalyzingQuality: existing.isAnalyzingQuality,
+              compressedUri: existing.compressedUri,
+              compressedSizeBytes: existing.compressedSizeBytes,
+              isCompressed: existing.isCompressed,
+              isCompressing: existing.isCompressing,
+              isAutoFavorited: existing.isAutoFavorited,
+            };
           }
           return item;
         });
+
+        triggerPipeline(merged);
+        return merged;
       });
     }, 2000);
 
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [triggerPipeline]);
 
   // Manual rescan handler
   const handleManualRescan = useCallback(async () => {
@@ -123,10 +244,20 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     try {
       const scanned = await scanDcimEntephotoPhotos();
       setPhotos(scanned);
+      triggerPipeline(scanned);
     } finally {
       setIsRefreshing(false);
     }
-  }, []);
+  }, [triggerPipeline]);
+
+  // Step 3: Trigger background pipeline when gallery screen gains focus (without redundant re-runs)
+  useFocusEffect(
+    useCallback(() => {
+      if (photos.length > 0) {
+        triggerPipeline(photos);
+      }
+    }, [photos, triggerPipeline]),
+  );
 
   // Dynamic live counts based on real photos
   const totalCount = photos.length;
@@ -162,6 +293,176 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
   }, [photos, activeFilter]);
 
+  /**
+   * Analysis progress: tracks how many photos have completed Skia/ML Kit analysis.
+   * Derived directly from filteredPhotos (avoids cascading setState in effects).
+   */
+  const analysisProgress = useMemo<{ analyzed: number; total: number } | null>(() => {
+    const total = filteredPhotos.length;
+    if (total === 0) return null;
+    const analyzed = filteredPhotos.filter(p => p.qualityResult != null).length;
+    return analyzed < total ? { analyzed, total } : null;
+  }, [filteredPhotos]);
+
+  /**
+   * Gallery batches — computed from time-based similar-photo batching.
+   *
+   * Two-phase:
+   *  Phase 1 (immediate, sync): `buildPhotoBatchesSync` runs the sequential algorithm
+   *    in-memory without consulting persistence. This gives instant rendering.
+   *  Phase 2 (async, debounced): `assignPhotoBatchesPersisted` loads persisted
+   *    assignments, skips already-assigned photos, saves new ones, and hydrates
+   *    authoritative persisted batches. The result replaces phase 1.
+   *
+   * PERFORMANCE: syncBatches only recalculates when filteredPhotos identity
+   * changes (i.e. new photos added or filter changed). Individual photo quality
+   * updates do NOT re-run the sync algorithm — they are batched by the debounced
+   * persistence effect instead.
+   */
+  const syncBatches = useMemo<RuntimeBatch[]>(() => {
+    return buildPhotoBatchesSync(filteredPhotos);
+  }, [filteredPhotos]);
+
+  /**
+   * Debounce ref: accumulates pHash/faceCount arrival ticks and fires the full
+   * persistence pipeline once after BATCH_DEBOUNCE_MS of silence.
+   *
+   * ROOT CAUSE FIXED: previously the useEffect dep array contained
+   * `filteredPhotos.map(p => ...).join('|')` which changed on EVERY single
+   * onPhotoUpdated call, triggering the full O(n) pipeline 200 times for
+   * 200 photos = O(n²). Now we debounce and fire once per burst.
+   */
+  const BATCH_DEBOUNCE_MS = 250;
+  const batchDebounceTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingBatchRun = React.useRef(false);
+
+  /**
+   * Stable snapshot of filteredPhotos for use inside the debounced callback.
+   * Updated synchronously on every render so the debounced callback always
+   * sees the latest photo list without capturing a stale closure.
+   */
+  const filteredPhotosRef = React.useRef(filteredPhotos);
+  useEffect(() => {
+    filteredPhotosRef.current = filteredPhotos;
+  });
+
+  /** Core batching pipeline — runs once per debounced burst, not once per photo. */
+  const runPersistentBatchingOnce = useCallback(async (cancelled: { value: boolean }) => {
+    const currentPhotos = filteredPhotosRef.current;
+    if (currentPhotos.length === 0 || cancelled.value || !isMountedRef.current) return;
+    try {
+      await assignPhotoBatchesPersisted(currentPhotos);
+      if (cancelled.value || !isMountedRef.current) return;
+
+      const allBatches = await getAllPersistedBatches();
+      if (cancelled.value || !isMountedRef.current) return;
+
+      const runtimeBatches = hydrateBatchesForRender(
+        allBatches.filter(b =>
+          b.photoIds.some(pid => currentPhotos.some(p => (p.filename || p.id) === pid)),
+        ),
+        currentPhotos,
+      );
+
+      if (!cancelled.value && isMountedRef.current) {
+        setPersistedBatches(runtimeBatches);
+        batchLoadedRef.current = true;
+      }
+    } catch (err) {
+      console.warn('[PhotoGallery] Persistent batch assignment failed, using sync fallback:', err);
+    }
+  }, []);
+
+  /**
+   * Debounced batching effect: fires the full pipeline ONCE after 250ms of
+   * analysis-completion inactivity instead of once per photo completion.
+   *
+   * Watches filteredPhotos identity (new photos / filter change) AND the count
+   * of photos that have a pHash — a cheap numeric signal that only increments,
+   * never triggers the O(n) string construction on every tick.
+   */
+  const analyzedCount = filteredPhotos.filter(
+    p => p.pHash != null || p.qualityResult?.pHash != null,
+  ).length;
+
+  useEffect(() => {
+    if (filteredPhotos.length === 0) return;
+
+    // Debounce: clear any pending timer and start a fresh one
+    const cancelled = { value: false };
+    if (batchDebounceTimer.current !== null) {
+      clearTimeout(batchDebounceTimer.current);
+    }
+    pendingBatchRun.current = true;
+    batchDebounceTimer.current = setTimeout(() => {
+      batchDebounceTimer.current = null;
+      pendingBatchRun.current = false;
+      runPersistentBatchingOnce(cancelled);
+    }, BATCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled.value = true;
+    };
+  }, [
+    filteredPhotos, // triggers when new photos arrive or filter changes
+    analyzedCount, // triggers when any photo completes analysis (cheap: just a number)
+    runPersistentBatchingOnce,
+  ]);
+
+  // Eagerly load persisted batches on initial mount if available (instant cross-session render)
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const allBatches = await getAllPersistedBatches();
+        if (!isMounted || allBatches.length === 0) return;
+        const currentPhotos = filteredPhotosRef.current;
+        if (currentPhotos.length === 0) return;
+
+        const runtimeBatches = hydrateBatchesForRender(
+          allBatches.filter(b =>
+            b.photoIds.some(pid => currentPhotos.some(p => (p.filename || p.id) === pid)),
+          ),
+          currentPhotos,
+        );
+
+        if (isMounted && runtimeBatches.length > 0) {
+          setPersistedBatches(runtimeBatches);
+          batchLoadedRef.current = true;
+          console.log(
+            `[PhotoGallery] Eagerly hydrated ${runtimeBatches.length} batch(es) from disk cache on launch.`,
+          );
+        }
+      } catch {}
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, [photos.length]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (batchDebounceTimer.current !== null) {
+        clearTimeout(batchDebounceTimer.current);
+      }
+    };
+  }, []);
+
+  /**
+   * Authoritative batches for rendering:
+   * Uses persisted batches when available (phase 2), otherwise sync fallback (phase 1).
+   */
+  const activeBatches = persistedBatches ?? syncBatches;
+
+  /**
+   * Sections built for React Native SectionList (one section per PhotoBatch).
+   * Renders all photos directly in a 3-column grid under each batch header.
+   */
+  const gallerySections = useMemo<GalleryBatchSection[]>(() => {
+    return buildGallerySections(activeBatches, filteredPhotos);
+  }, [activeBatches, filteredPhotos]);
+
   // Back Navigation
   const handleBack = useCallback(() => {
     if (navigation.canGoBack()) {
@@ -192,6 +493,46 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             ...item,
             selected: nextSelected,
             status: nextSelected ? 'marked' : 'new',
+          };
+        }
+        return item;
+      });
+    });
+  }, []);
+
+  // Step 7: Toggle Select All photos within a specific batch (with 20-photo safety limit)
+  const toggleBatchSelection = useCallback((batch: RuntimeBatch) => {
+    setPhotos(prev => {
+      const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
+      if (selectablePhotos.length === 0) return prev;
+
+      const allSelected = selectablePhotos.every(p => {
+        const current = prev.find(item => item.id === p.id);
+        return current?.selected;
+      });
+
+      const batchPhotoIds = new Set(batch.photos.map(p => p.id));
+      const currentTotalSelected = prev.filter(p => p.selected).length;
+      const unselectedInBatch = selectablePhotos.filter(p => {
+        const current = prev.find(item => item.id === p.id);
+        return !current?.selected;
+      });
+
+      if (!allSelected && currentTotalSelected + unselectedInBatch.length > 20) {
+        Alert.alert(
+          'Selection Limit Reached',
+          'You can mark and upload a maximum of 20 photos at a time.',
+        );
+        return prev;
+      }
+
+      return prev.map(item => {
+        if (batchPhotoIds.has(item.id) && item.status !== 'uploaded') {
+          const nextSelected = !allSelected;
+          return {
+            ...item,
+            selected: nextSelected,
+            status: nextSelected ? 'marked' : item.status === 'marked' ? 'new' : item.status,
           };
         }
         return item;
@@ -477,19 +818,31 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     [eventId, eventTitle],
   );
 
-  // Render Single Grid Tile
-  const renderPhotoItem = useCallback(
-    ({ item, index }: { item: GalleryPhotoItem; index: number }) => {
+  // ── Render: Single Grid Tile (shared for single, batch_photo row types) ──
+  const renderPhotoTile = useCallback(
+    (item: GalleryPhotoItem, flatIndex: number, isBestShot?: boolean) => {
       const isSelected = item.selected;
       const isUploaded = item.status === 'uploaded';
       const isPhotoUploading = uploadingPhotoIds.has(item.id);
+
+      const isNeedsReview =
+        item.qualityResult &&
+        (item.qualityResult.blur ||
+          item.qualityResult.overExposure ||
+          (item.qualityResult.face && !item.qualityResult.eyesOpen));
+
+      const isQualityPass = item.qualityResult && !isNeedsReview;
 
       return (
         <View style={styles.gridCellContainer}>
           <Pressable
             onPress={() => {
-              setViewerInitialIndex(index);
+              setViewerInitialIndex(flatIndex);
               setViewerVisible(true);
+            }}
+            onLongPress={() => {
+              setSelectedQualityPhoto(item);
+              setIsQualityModalVisible(true);
             }}
             style={({ pressed }) => [
               styles.photoTileWrapper,
@@ -502,15 +855,65 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             accessibilityRole="button"
             accessibilityLabel={`Open photo ${item.filename || item.id}`}
           >
-            {/* Main Photo Thumbnail */}
-            <Image source={{ uri: item.uri }} style={styles.photoImage} resizeMode="cover" />
+            {/* Main Photo Thumbnail with Skeleton Placeholder (Step 9) */}
+            <ImageWithSkeleton
+              source={{ uri: item.uri }}
+              style={styles.photoImage}
+              containerStyle={styles.photoImageContainer}
+              resizeMode="cover"
+            />
+
+            {/* Top-left Star Best Shot Badge */}
+            {isBestShot && (
+              <View style={styles.tileStarBadge}>
+                <Star size={9} color="#FFFFFF" fill="#FFB800" strokeWidth={0} />
+                <Text style={styles.tileStarBadgeText}>Best</Text>
+              </View>
+            )}
 
             {/* Bottom-left RAW Tag */}
             {item.isRaw && (
-              <View style={styles.rawBadgeContainer}>
+              <View style={[styles.rawBadgeContainer, isBestShot && { bottom: 22 }]}>
                 <Text style={styles.rawBadgeText}>RAW</Text>
               </View>
             )}
+
+            {/* Bottom-right Quality Indicator Badge */}
+            {item.isAnalyzingQuality ? (
+              <View style={styles.qualityAnalyzingBadge}>
+                <ActivityIndicator size={8} color="#FFFFFF" />
+              </View>
+            ) : isNeedsReview ? (
+              <Pressable
+                onPress={e => {
+                  e.stopPropagation();
+                  setSelectedQualityPhoto(item);
+                  setIsQualityModalVisible(true);
+                }}
+                hitSlop={6}
+                style={styles.qualityReviewBadge}
+                accessibilityRole="button"
+                accessibilityLabel="Quality review details"
+              >
+                <AlertTriangle size={10} color="#92400E" strokeWidth={2.8} />
+                <Text style={styles.qualityReviewBadgeText}>Review</Text>
+              </Pressable>
+            ) : isQualityPass ? (
+              <Pressable
+                onPress={e => {
+                  e.stopPropagation();
+                  setSelectedQualityPhoto(item);
+                  setIsQualityModalVisible(true);
+                }}
+                hitSlop={6}
+                style={styles.qualityPassBadge}
+                accessibilityRole="button"
+                accessibilityLabel="Quality passed"
+              >
+                <Check size={9} color="#065F46" strokeWidth={3} />
+                <Text style={styles.qualityPassBadgeText}>Sharp</Text>
+              </Pressable>
+            ) : null}
 
             {/* Top-right Status / Selection Indicator with independent press hitSlop */}
             <Pressable
@@ -550,6 +953,115 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       );
     },
     [togglePhotoSelection, uploadingPhotoIds],
+  );
+
+  // ── Render: Batch Section Header (SectionList) ───────────────────────────
+  const renderSectionHeader = useCallback(
+    ({ section }: { section: GalleryBatchSection }) => {
+      const { title, batch } = section;
+      const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
+      const isAllBatchSelected =
+        selectablePhotos.length > 0 &&
+        selectablePhotos.every(p => {
+          const livePhoto = photos.find(item => item.id === p.id);
+          return livePhoto?.selected;
+        });
+
+      return (
+        <View
+          style={[
+            styles.batchHeaderRow,
+            {
+              backgroundColor: isDark ? '#18181D' : '#F5F0E8',
+              borderColor: isDark ? '#2E2E36' : '#E8E2D8',
+            },
+          ]}
+          accessibilityRole="header"
+          accessibilityLabel={title}
+        >
+          <View
+            style={[styles.batchHeaderAccent, { backgroundColor: isDark ? '#FF6B4A' : '#161616' }]}
+          />
+
+          {/* Left: Clean Header Title (Time + Batch + Photo Count) */}
+          <View style={styles.batchHeaderTextBlock}>
+            <View style={styles.batchHeaderTitleRow}>
+              <Text style={[styles.batchHeaderLabel, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                {title}
+              </Text>
+            </View>
+          </View>
+
+          {/* Right Action Button: Select All per batch toggle */}
+          {selectablePhotos.length > 0 && (
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => toggleBatchSelection(batch)}
+              style={[
+                styles.batchSelectAllBtn,
+                isAllBatchSelected && styles.batchSelectAllBtnActive,
+                {
+                  backgroundColor: isAllBatchSelected
+                    ? isDark
+                      ? '#FF6B4A'
+                      : '#161616'
+                    : isDark
+                      ? '#26262E'
+                      : '#FFFFFF',
+                  borderColor: isDark ? '#3F3F46' : '#161616',
+                },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={
+                isAllBatchSelected ? 'Deselect all in batch' : 'Select all in batch'
+              }
+            >
+              <Check
+                size={11}
+                color={isAllBatchSelected ? '#FFFFFF' : isDark ? '#A1A1AA' : '#52525B'}
+                strokeWidth={3}
+                style={{ marginRight: 3 }}
+              />
+              <Text
+                style={[
+                  styles.batchSelectAllText,
+                  {
+                    color: isAllBatchSelected ? '#FFFFFF' : isDark ? '#D4D4D8' : '#161616',
+                  },
+                ]}
+              >
+                {isAllBatchSelected ? 'Selected' : 'Select all'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      );
+    },
+    [isDark, photos, toggleBatchSelection],
+  );
+
+  // ── Render: Section Item (3-Column Grid Row for all batch photos) ──────────
+  const renderSectionItem = useCallback(
+    ({ item }: { item: GallerySectionRow }) => {
+      if (item.type !== 'grid_row') return null;
+
+      // Grid Row: 3-column items with skeleton placeholders
+      return (
+        <View style={styles.photoRowGroup}>
+          {item.photos.map(({ photo, photoIndex, isBestShot }) => (
+            <React.Fragment key={photo.id}>
+              {renderPhotoTile(photo, photoIndex, isBestShot)}
+            </React.Fragment>
+          ))}
+          {/* Spacer tiles to keep grid aligned when row has < 3 photos */}
+          {item.photos.length < 3 &&
+            Array.from({ length: 3 - item.photos.length }).map((_, i) => (
+              <View key={`spacer-${i}`} style={styles.gridCellContainer} />
+            ))}
+        </View>
+      );
+    },
+    [renderPhotoTile],
   );
 
   return (
@@ -688,21 +1200,46 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           />
         </View>
 
-        {/* ── 3. PHOTO GRID ── */}
-        <FlatList
-          data={filteredPhotos}
-          renderItem={renderPhotoItem}
-          keyExtractor={item => item.id}
-          numColumns={3}
+        {/* ── 3. ANALYSIS PROGRESS BANNER (shown during Skia/ML Kit analysis burst) ── */}
+        {analysisProgress !== null && (
+          <View
+            style={[
+              styles.analysisBanner,
+              {
+                backgroundColor: isDark ? '#1A1A1E' : '#FFF9F0',
+                borderColor: isDark ? '#2E2E36' : '#E8DDD0',
+              },
+            ]}
+            accessibilityLiveRegion="polite"
+            accessibilityLabel={`Analyzing ${analysisProgress.analyzed} of ${analysisProgress.total} photos`}
+          >
+            <ActivityIndicator
+              size={11}
+              color={isDark ? '#FFA07A' : '#161616'}
+              style={{ marginRight: 6 }}
+            />
+            <Text style={[styles.analysisBannerText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+              {`Analyzing ${analysisProgress.analyzed}/${analysisProgress.total}…`}
+            </Text>
+          </View>
+        )}
+
+        {/* ── 4. PHOTO GRID (SectionList, one section per PhotoBatch) ── */}
+        <SectionList<GallerySectionRow, GalleryBatchSection>
+          sections={gallerySections}
+          keyExtractor={item => item.rowKey}
+          renderItem={renderSectionItem}
+          renderSectionHeader={renderSectionHeader}
           contentContainerStyle={[
             styles.gridContentContainer,
             { paddingBottom: insets.bottom + 120 },
           ]}
-          columnWrapperStyle={filteredPhotos.length > 0 ? styles.gridColumnWrapper : undefined}
           showsVerticalScrollIndicator={false}
           initialNumToRender={15}
-          maxToRenderPerBatch={12}
+          maxToRenderPerBatch={10}
           windowSize={7}
+          removeClippedSubviews={true}
+          stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => (
             <View style={styles.emptyContainer}>
               <View
@@ -717,7 +1254,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
               </View>
               <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                No photos in DCIM/Entephoto
+                {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
               </Text>
               <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
                 Connect your camera or copy photo files into {'\n'}
@@ -746,7 +1283,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 <Text
                   style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
                 >
-                  {isRefreshing ? 'Scanning...' : 'Rescan DCIM Folder'}
+                  {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -844,6 +1381,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           </View>
         </View>
 
+        {/* ── 4b. PIPELINE NOTIFICATION STACK (iOS Lock Screen Notification Group) ── */}
+        <PipelineNotificationStack bottomOffset={84} />
+
         {/* ── 5. FULL-SCREEN TWO-STAGE PHOTO VIEWER ── */}
         <FullScreenPhotoViewer
           visible={viewerVisible}
@@ -855,6 +1395,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onToggleMark={togglePhotoSelection}
           onUploadPhoto={handleUploadSinglePhoto}
           onDeletePhoto={handleDeletePhoto}
+          onOpenQualityDetail={photo => {
+            setSelectedQualityPhoto(photo);
+            setIsQualityModalVisible(true);
+          }}
           isDark={isDark}
         />
 
@@ -873,6 +1417,17 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onClearSelection={handleClearSelection}
           onUploadSelected={handleUploadFromSheet}
           onDeleteSelected={handleDeleteSelectedPhotos}
+        />
+
+        {/* ── 7. PHOTO QUALITY DIAGNOSTICS MODAL (Step 7) ── */}
+        <PhotoQualityModal
+          visible={isQualityModalVisible}
+          photo={selectedQualityPhoto}
+          onClose={() => {
+            setIsQualityModalVisible(false);
+            setSelectedQualityPhoto(null);
+          }}
+          isDark={isDark}
         />
       </SafeAreaView>
     </AppBackground>
@@ -1039,9 +1594,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   gridCellContainer: {
-    flex: 1 / 3,
+    // numColumns=1; tiles self-arrange in rows of 3 using flexDirection: 'row' + flexWrap
+    // Each tile takes exactly 1/3 of the content width.
+    width: '33.33%',
     aspectRatio: 1,
     borderRadius: 14,
+    padding: 4,
   },
   photoTileWrapper: {
     width: '100%',
@@ -1053,6 +1611,90 @@ const styles = StyleSheet.create({
     borderWidth: 2.5,
     borderColor: 'transparent',
   },
+
+  // ── Batch Header Row (SectionList) ─────────────────────────────────────────
+  batchHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 12,
+    marginBottom: 6,
+    marginHorizontal: 0,
+    borderRadius: 12,
+    borderWidth: 1.2,
+    gap: 10,
+  },
+  batchHeaderAccent: {
+    width: 3.5,
+    borderRadius: 2,
+    height: 22,
+  },
+  batchHeaderTextBlock: {
+    flex: 1,
+  },
+  batchHeaderTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  batchHeaderLabel: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  batchHeaderTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  batchHeaderTagText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 9.5,
+    fontWeight: '700',
+  },
+  batchHeaderActionsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  batchSelectAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4.5,
+    borderRadius: 7,
+    borderWidth: 1.2,
+  },
+  batchSelectAllBtnActive: {
+    borderColor: '#161616',
+  },
+  batchSelectAllText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  batchExpandToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4.5,
+    borderRadius: 7,
+    borderWidth: 1.2,
+  },
+  batchExpandToggleText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+
+  // ── Photo Row Group (3-column grid row) ─────────────────────────────────────
+  photoRowGroup: {
+    flexDirection: 'row',
+    marginBottom: 2,
+  },
   photoTileSelectedBorder: {
     borderColor: '#FF5E3A',
     borderWidth: 3,
@@ -1060,10 +1702,13 @@ const styles = StyleSheet.create({
   photoTileUploadedDimmed: {
     opacity: 0.65,
   },
+  photoImageContainer: {
+    width: '100%',
+    height: '100%',
+  },
   photoImage: {
     width: '100%',
     height: '100%',
-    backgroundColor: '#2A2A32',
   },
   rawBadgeContainer: {
     position: 'absolute',
@@ -1130,6 +1775,215 @@ const styles = StyleSheet.create({
     borderColor: '#FFA07A',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  qualityReviewBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1.2,
+    borderColor: '#D97706',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 6,
+    ...Platform.select({
+      android: { elevation: 2 },
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.2,
+        shadowRadius: 1,
+      },
+    }),
+  },
+  qualityReviewBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#92400E',
+  },
+  qualityPassBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: '#D1FAE5',
+    borderWidth: 1.2,
+    borderColor: '#059669',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  qualityPassBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#065F46',
+  },
+  qualityAnalyzingBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: 'rgba(22, 22, 22, 0.75)',
+    padding: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+
+  // ── Star Best Shot Badges & Collapsed Hero View (Step 3) ───────────────────
+  tileStarBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(15, 15, 18, 0.88)',
+    borderWidth: 1.2,
+    borderColor: '#FFB800',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 6,
+    zIndex: 2,
+  },
+  tileStarBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#FFB800',
+    letterSpacing: 0.2,
+  },
+  heroCardOuter: {
+    width: '100%',
+    paddingHorizontal: 0,
+    marginBottom: 6,
+    marginTop: 2,
+  },
+  heroCardContainer: {
+    flexDirection: 'row',
+    borderRadius: 16,
+    borderWidth: 1.4,
+    overflow: 'hidden',
+    padding: 10,
+    gap: 12,
+    alignItems: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.12,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 2,
+      },
+    }),
+  },
+  heroImageContainer: {
+    width: 90,
+    height: 90,
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#26262E',
+  },
+  heroImage: {
+    width: '100%',
+    height: '100%',
+  },
+  heroStarBadge: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 15, 18, 0.90)',
+    borderWidth: 1,
+    borderColor: '#FFB800',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 5,
+    zIndex: 2,
+  },
+  heroStarBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#FFB800',
+  },
+  heroSelectionContainer: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    zIndex: 3,
+  },
+  heroPhotoCountOverlay: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(10, 10, 14, 0.85)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  heroPhotoCountOverlayText: {
+    fontFamily: FONTS.jetbrainsMono.bold,
+    fontSize: 9.5,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  heroDetailsSection: {
+    flex: 1,
+    gap: 6,
+    justifyContent: 'center',
+  },
+  heroTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  heroCaptionText: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  heroSignalsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  signalChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  signalChipText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 9.5,
+    fontWeight: '700',
+  },
+  heroExpandActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+  },
+  heroExpandPrompt: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 11,
+    fontWeight: '700',
   },
 
   // ── Empty State Styles ──
@@ -1345,5 +2199,18 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     color: '#FFFFFF',
+  },
+  // Analysis progress banner: shown during Skia/ML Kit burst, disappears on completion
+  analysisBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+  },
+  analysisBannerText: {
+    fontFamily: FONTS.jetbrainsMono.bold,
+    fontSize: 11,
+    fontWeight: '600',
   },
 });

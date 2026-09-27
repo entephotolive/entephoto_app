@@ -1,6 +1,11 @@
-import { File } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { ENV, API_ENDPOINTS } from '../config/api.config';
 import { GalleryPhotoItem } from '../screens/Gallery/PhotoSelectionGalleryScreen';
+import {
+  compressToTargetSize,
+  cleanupTempFile,
+  TARGET_UPLOAD_BYTES,
+} from './imageCompressionService';
 
 export interface UploadPhotoResponse {
   images_uploaded?: number;
@@ -62,16 +67,7 @@ export function getMimeTypeFromFilename(filename?: string): string {
 }
 
 /**
- * Uploads a single photo to POST /api/upload-images/.
- *
- * WHY expo-file-system's File instead of { uri, name, type }:
- * Expo SDK 57 replaces global fetch with its own WinterCG-compliant
- * implementation (expo/src/winter/runtime.native.ts:52). That fetch
- * serialises FormData via convertFormDataAsync(), which accepts only
- * strings, Blob instances, or objects with a bytes() method.
- * The plain { uri, name, type } object that React Native's XHR bridge
- * understands is NOT in that list and throws "Unsupported FormDataPart implementation".
- * expo-file-system's File class has bytes() and passes the check.
+ * Uploads a single photo to POST /api/upload-images/ with lossy pre-compression to ~2MB.
  */
 export async function uploadSinglePhoto(
   eventId: string,
@@ -106,138 +102,167 @@ export async function uploadSinglePhoto(
     );
   }
 
-  // 3. Normalise URI
-  const rawUri = photo.uri ?? '';
-  const uri =
-    rawUri.startsWith('content://') || rawUri.startsWith('file://') ? rawUri : `file://${rawUri}`;
+  // 3. Source URI — always the original on-disk file; never a pre-compressed copy
+  const sourceUri =
+    photo.uri.startsWith('content://') || photo.uri.startsWith('file://')
+      ? photo.uri
+      : `file://${photo.uri}`;
 
-  // 4. Build expo-file-system File
-  const expoFile = new File(uri);
-  const nativeType: string = (expoFile as any).type ?? '';
-  const finalMime = nativeType && ALLOWED_MIME_TYPES.has(nativeType) ? nativeType : mimeType;
+  /** Temp files created during compression / rename that must be cleaned up after upload. */
+  const tempUrisToCleanup: string[] = [];
+
   try {
-    (expoFile as any).type = finalMime;
-  } catch {
-    // Non-writable getter fallback
-  }
+    // 4. Compress at upload time (target: 2–3 MB).
+    // compressToTargetSize skips encoding for JPEG files already ≤ 4 MB;
+    // otherwise iteratively reduces quality, always outputting JPEG.
+    const compressionResult = await compressToTargetSize(sourceUri, TARGET_UPLOAD_BYTES);
+    let finalUploadUri = compressionResult.uri;
+    const finalSizeBytes = compressionResult.sizeBytes;
 
-  // 5. Client-side pre-check: File size limit (25 MB)
-  const fileSize: number = (expoFile as any).size ?? 0;
-  if (fileSize > MAX_UPLOAD_BYTES) {
-    const sizeMb = (fileSize / (1024 * 1024)).toFixed(1);
-    throw new Error(
-      `File size (${sizeMb} MB) for "${filename}" exceeds the 25 MB server upload limit.`,
-    );
-  }
+    // MIME type: compression always outputs JPEG when it ran; keep original type if skipped.
+    const finalMime = compressionResult.skipped ? mimeType : 'image/jpeg';
 
-  // 6. Build FormData
-  const formData = new FormData();
-  formData.append('event_id', eventId.trim());
-  if (folderId != null && folderId !== '') {
-    formData.append('folder_id', folderId.trim());
-  }
-  formData.append('images', expoFile as unknown as Blob);
+    const initialSizeMb = (
+      (compressionResult.originalSizeBytes ?? finalSizeBytes) /
+      (1024 * 1024)
+    ).toFixed(2);
+    const finalSizeMb = (finalSizeBytes / (1024 * 1024)).toFixed(2);
 
-  // 7. Headers
-  // NOTE: Authorization header is intentionally omitted for this endpoint.
-  // Django's DEFAULT_AUTHENTICATION_CLASSES (SimpleJWT) rejects the mobile photographer
-  // token (which carries 'photographer_id' instead of 'user_id') with HTTP 401 before the
-  // view runs. Since upload_images has AllowAny permissions and does not use request.user,
-  // omitting the Authorization header allows the request to succeed without 401.
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-  };
+    if (!compressionResult.skipped) {
+      console.log('[photoUploadService] Pre-upload Compression Stats:', {
+        filename,
+        originalSize: `${initialSizeMb} MB`,
+        compressedSize: `${finalSizeMb} MB`,
+        dimensions: `${compressionResult.width}x${compressionResult.height}`,
+        quality: compressionResult.quality,
+        iterations: compressionResult.iterations,
+        hitFloor: compressionResult.hitFloor,
+      });
 
-  const uploadUrl = `${ENV.API_BASE_URL}${API_ENDPOINTS.PHOTOS.UPLOAD}`;
+      // Rename the temp file to the original camera filename.
+      // FileSystem.uploadAsync derives the multipart Content-Disposition filename from the
+      // fileUri basename, so we must give it the correct name before uploading.
+      const renamedUri = `${FileSystem.cacheDirectory}${filename}`;
+      await FileSystem.moveAsync({ from: finalUploadUri, to: renamedUri });
+      finalUploadUri = renamedUri;
+      tempUrisToCleanup.push(renamedUri); // cleaned up in finally
+    } else {
+      console.log(
+        `[photoUploadService] Skipped compression (≤4 MB JPEG): ${filename} (${finalSizeMb} MB)`,
+      );
+    }
 
-  // Pre-request diagnostic log (header KEYS only, no token values)
-  console.log('[photoUploadService] Starting upload:', {
-    url: uploadUrl,
-    headerKeys: Object.keys(headers),
-    file: {
-      name: filename,
-      mimeType: finalMime,
-      sizeBytes: fileSize > 0 ? fileSize : undefined,
-    },
-  });
+    // 5. Client-side size guard (25 MB Django default).
+    if (finalSizeBytes > MAX_UPLOAD_BYTES) {
+      const sizeMb = (finalSizeBytes / (1024 * 1024)).toFixed(1);
+      throw new Error(
+        `File size (${sizeMb} MB) for "${filename}" exceeds the 25 MB server upload limit.`,
+      );
+    }
 
-  // 8. AbortController with 120s timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, 120000);
+    const uploadUrl = `${ENV.API_BASE_URL}${API_ENDPOINTS.PHOTOS.UPLOAD}`;
 
-  let rawResponse: Response;
-  try {
-    rawResponse = await fetch(uploadUrl, {
-      method: 'POST',
-      headers,
-      body: formData,
-      signal: controller.signal,
+    // Additional multipart form fields (event_id, optional folder_id)
+    const additionalParams: Record<string, string> = { event_id: eventId.trim() };
+    if (folderId != null && folderId !== '') {
+      additionalParams.folder_id = folderId.trim();
+    }
+
+    console.log('[photoUploadService] Starting upload:', {
+      url: uploadUrl,
+      file: { name: filename, mimeType: finalMime, sizeBytes: finalSizeBytes },
+      event_id: eventId.trim(),
+      ...(additionalParams.folder_id ? { folder_id: additionalParams.folder_id } : {}),
     });
-  } catch (networkErr: any) {
-    if (networkErr?.name === 'AbortError' || controller.signal.aborted) {
-      const msg = `Upload timed out after 120s for "${filename}".`;
-      console.error('[photoUploadService]', msg);
-      throw new Error(msg);
+
+    // 6. Upload via FileSystem.uploadAsync — uses native HTTP multipart,
+    //    bypassing the Hermes JS FormData limitation that caused
+    //    "Unsupported FormDataPart implementation" errors.
+    let uploadResult: FileSystem.FileSystemUploadResult;
+    try {
+      uploadResult = await FileSystem.uploadAsync(uploadUrl, finalUploadUri, {
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        httpMethod: 'POST',
+        fieldName: 'images',
+        mimeType: finalMime,
+        parameters: additionalParams,
+        headers: { Accept: 'application/json' },
+      });
+    } catch (networkErr: any) {
+      console.error(
+        '[photoUploadService] uploadAsync network failure:',
+        networkErr?.message ?? networkErr,
+      );
+      throw networkErr;
     }
-    console.error(
-      '[photoUploadService] fetch() network failure:',
-      networkErr?.message ?? networkErr,
-    );
-    throw networkErr;
+
+    console.log(`[photoUploadService] HTTP ${uploadResult.status} received for "${filename}"`);
+
+    // 7. Parse response body.
+    const responseText = uploadResult.body ?? '';
+    let responseData: UploadPhotoResponse;
+    try {
+      responseData = JSON.parse(responseText);
+    } catch {
+      throw new Error(
+        `[photoUploadService] Non-JSON response (HTTP ${uploadResult.status}): ${responseText.slice(0, 300)}`,
+      );
+    }
+
+    // 8. Handle HTTP error status codes.
+    const httpOk = uploadResult.status >= 200 && uploadResult.status < 300;
+    if (!httpOk) {
+      console.error(
+        `[photoUploadService] Upload failed HTTP ${uploadResult.status}:`,
+        responseData,
+      );
+      if (uploadResult.status === 400) {
+        const details = responseData.details
+          ? typeof responseData.details === 'string'
+            ? responseData.details
+            : JSON.stringify(responseData.details)
+          : responseData.error || JSON.stringify(responseData);
+        throw new Error(`Upload failed (Bad Request): ${details}`);
+      }
+      if (uploadResult.status === 401 || uploadResult.status === 403) {
+        throw new Error('Upload failed: Authentication error. Please sign in again.');
+      }
+      if (uploadResult.status === 404) {
+        throw new Error(`Event not found (ID: ${eventId}). Please verify the event still exists.`);
+      }
+      if (uploadResult.status === 413) {
+        throw new Error('Upload failed: File exceeds maximum allowed size on server (413).');
+      }
+      if (uploadResult.status === 415) {
+        throw new Error('Upload failed: Unsupported media type (415).');
+      }
+      throw new Error(
+        `Upload failed: HTTP ${uploadResult.status} — ${responseData.error || JSON.stringify(responseData)}`,
+      );
+    }
+
+    // 9. Backend returned 2xx — verify the photo was actually stored.
+    if ((responseData.images_uploaded ?? 0) < 1) {
+      const reasons = responseData.reason_why_not_uploaded;
+      if (Array.isArray(reasons) && reasons.length > 0) {
+        const firstReason =
+          reasons[0]?.reason || reasons[0]?.filename || 'Image rejected by server';
+        throw new Error(`Upload failed: ${firstReason}`);
+      }
+      if ((responseData.images_not_uploaded ?? 0) > 0) {
+        throw new Error(`Upload failed: Photo "${filename}" was rejected or already uploaded.`);
+      }
+    }
+
+    console.log(`[photoUploadService] ✅ Uploaded ${filename} successfully:`, {
+      images_uploaded: responseData.images_uploaded,
+      total_faces_detected: responseData.total_faces_detected,
+    });
+    return responseData;
   } finally {
-    clearTimeout(timeoutId);
-  }
-
-  // 9. Parse response body
-  const responseText = await rawResponse.text();
-  let responseData: UploadPhotoResponse;
-  try {
-    responseData = JSON.parse(responseText);
-  } catch {
-    throw new Error(
-      `[photoUploadService] Non-JSON response (HTTP ${rawResponse.status}): ${responseText.slice(0, 300)}`,
-    );
-  }
-
-  // 10. Handle HTTP error status codes
-  if (!rawResponse.ok) {
-    console.error(`[photoUploadService] Upload failed HTTP ${rawResponse.status}:`, responseData);
-    if (rawResponse.status === 400) {
-      const details = responseData.details
-        ? typeof responseData.details === 'string'
-          ? responseData.details
-          : JSON.stringify(responseData.details)
-        : responseData.error || JSON.stringify(responseData);
-      throw new Error(`Upload failed (Bad Request): ${details}`);
-    }
-    if (rawResponse.status === 404) {
-      throw new Error(`Event not found (ID: ${eventId}). Please verify the event still exists.`);
-    }
-    if (rawResponse.status === 413) {
-      throw new Error('Upload failed: File exceeds maximum allowed size on server (413).');
-    }
-    if (rawResponse.status === 415) {
-      throw new Error('Upload failed: Unsupported media type (415).');
-    }
-    throw new Error(
-      `Upload failed: HTTP ${rawResponse.status} — ${responseData.error || JSON.stringify(responseData)}`,
-    );
-  }
-
-  // 11. Backend returned 200 OK — verify that photo was actually stored
-  if ((responseData.images_uploaded ?? 0) < 1) {
-    const reasons = responseData.reason_why_not_uploaded;
-    if (Array.isArray(reasons) && reasons.length > 0) {
-      const firstReason = reasons[0]?.reason || reasons[0]?.filename || 'Image rejected by server';
-      throw new Error(`Upload failed: ${firstReason}`);
-    }
-    if ((responseData.images_not_uploaded ?? 0) > 0) {
-      throw new Error(`Upload failed: Photo "${filename}" was rejected or already uploaded.`);
+    // 10. Clean up all temp files (compressed output + renamed copy) after upload finishes.
+    for (const tempUri of tempUrisToCleanup) {
+      await cleanupTempFile(tempUri);
     }
   }
-
-  console.log(`[photoUploadService] Successfully uploaded ${filename}:`, responseData);
-  return responseData;
 }

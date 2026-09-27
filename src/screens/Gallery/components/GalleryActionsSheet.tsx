@@ -169,7 +169,7 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
     {
       id: 'rescan',
       icon: <RefreshCw size={24} color="#3B82F6" strokeWidth={2.3} />,
-      label: 'Rescan DCIM',
+      label: 'Rescan Photos',
       backgroundColor: isDark ? '#182538' : '#EBF4FF',
       onPress: onRescan,
     },

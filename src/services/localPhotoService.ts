@@ -1,9 +1,17 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import { Directory, File } from 'expo-file-system';
+import { Album } from 'expo-media-library';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
+import { loadAllQualityResults } from './photoQualityPersistenceService';
+import {
+  PHOTO_STORAGE_DIR_URI,
+  PHOTO_STORAGE_DISPLAY_PATH,
+  PHOTO_ALBUM_NAME,
+} from '@/config/photo.config';
 
-// ── Canonical DCIM Entephoto Directory on Android ────────────────────────────
-export const CANONICAL_DCIM_DIR_URI = 'file:///sdcard/DCIM/Entephoto';
+// ── Canonical Photo Directory on Android (synced with env) ────────────────────
+export const CANONICAL_DCIM_DIR_URI = PHOTO_STORAGE_DIR_URI;
+export { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH, PHOTO_ALBUM_NAME };
 
 // Supported Image Extensions
 const SUPPORTED_EXTENSIONS = [
@@ -102,8 +110,7 @@ export async function requestStoragePermission(): Promise<boolean> {
     console.log(`[LocalPhotoService] Requesting storage permission: ${permission}`);
     const result = await PermissionsAndroid.request(permission, {
       title: 'EntePhoto Storage Access',
-      message:
-        'EntePhoto requires storage access to view and sync photos from your DCIM/Entephoto folder.',
+      message: `EntePhoto requires storage access to view and sync photos from your ${PHOTO_STORAGE_DISPLAY_PATH} folder.`,
       buttonNeutral: 'Ask Me Later',
       buttonNegative: 'Cancel',
       buttonPositive: 'Grant Access',
@@ -119,7 +126,7 @@ export async function requestStoragePermission(): Promise<boolean> {
 }
 
 /**
- * Scans /sdcard/DCIM/Entephoto dynamically using Expo SDK 57 Directory API.
+ * Scans the configured photo storage directory dynamically using Expo SDK 57 Directory API.
  * Returns only real photos found on disk, or empty array with clear error logs.
  */
 export async function scanDcimEntephotoPhotos(
@@ -133,7 +140,7 @@ export async function scanDcimEntephotoPhotos(
   if (!hasPermission) {
     if (!silent) {
       console.warn(
-        '[LocalPhotoService] Storage permission denied. Cannot scan DCIM/Entephoto directory.',
+        `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
       );
     }
     return [];
@@ -156,27 +163,73 @@ export async function scanDcimEntephotoPhotos(
       return entry instanceof File && isPhotoFile(entry.name);
     });
 
-    return photoEntries.map((file, index) => {
+    // Lookup existing MediaLibrary assets in the configured album if available
+    const mediaAssetsByFilename = new Map<string, string>();
+    try {
+      const album = await Album.get(PHOTO_ALBUM_NAME);
+      if (album) {
+        const assets = await album.getAssets();
+        for (const a of assets) {
+          const fname = await a.getFilename();
+          if (fname && a.id) {
+            mediaAssetsByFilename.set(fname, a.id);
+          }
+        }
+      }
+    } catch {}
+
+    // Eagerly hydrate existing quality results from persistence cache
+    let qualityMap = new Map();
+    try {
+      qualityMap = await loadAllQualityResults();
+    } catch {}
+
+    let cacheHitCount = 0;
+    const scannedPhotos: GalleryPhotoItem[] = photoEntries.map((file, index) => {
       const isRaw = isRawPhoto(file.name);
       const modTime = file.modificationTime;
       const timeFormatted = modTime
         ? new Date(modTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         : 'Just now';
 
+      const realAssetId = mediaAssetsByFilename.get(file.name);
+      const cachedQuality = qualityMap.get(file.name) || undefined;
+      if (cachedQuality) {
+        cacheHitCount++;
+      }
+
       return {
-        id: `dcim-${file.name}-${index}`,
+        id: realAssetId || `dcim-${file.name}-${index}`,
+        assetId: realAssetId,
         uri: file.uri,
         filename: file.name,
         isRaw,
         status: 'new',
         selected: false,
         timestamp: timeFormatted,
+        // Real file modification time as epoch ms — used by photoBatchingService for time-gap gating.
+        // Expo FileSystem Directory API returns modificationTime as seconds since epoch on Android.
+        capturedAt: modTime
+          ? typeof modTime === 'number' && modTime < 1e10
+            ? modTime * 1000 // Expo returns seconds — convert to ms
+            : modTime // Already ms
+          : undefined,
         dimensions: undefined,
         aperture: undefined,
         iso: undefined,
         shutter: undefined,
+        qualityResult: cachedQuality,
+        isAnalyzingQuality: false,
       };
     });
+
+    if (scannedPhotos.length > 0) {
+      console.log(
+        `[LocalPhotoService] Scanned ${scannedPhotos.length} photos: ${cacheHitCount} quality cache hits, ${scannedPhotos.length - cacheHitCount} need analysis.`,
+      );
+    }
+
+    return scannedPhotos;
   } catch (error: any) {
     console.error(
       `[LocalPhotoService] Failed to read directory at ${CANONICAL_DCIM_DIR_URI}:`,

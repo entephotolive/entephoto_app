@@ -8,4 +8,10 @@ export * from './colors';
 export * from './typography';
 export * from './spacing';
 export * from './shadows';
-export * from './ThemeProvider';
+export {
+  ThemeProvider,
+  useTheme,
+  type Theme,
+  type ThemeMode,
+  type ThemeProviderProps,
+} from './ThemeProvider';
