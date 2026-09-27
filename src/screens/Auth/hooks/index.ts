@@ -1,4 +1,0 @@
-/**
- * Auth screen hooks
- */
-export {};

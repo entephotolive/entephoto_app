@@ -1,4 +1,0 @@
-/**
- * Auth feature screens
- */
-export {};
