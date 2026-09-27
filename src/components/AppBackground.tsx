@@ -3,7 +3,7 @@ import { View, StyleSheet, StatusBar, ViewStyle, StyleProp, StatusBarStyle } fro
 import Svg, { Defs, RadialGradient, Stop, Circle } from 'react-native-svg';
 import { useTheme } from '@/constants/theme';
 
-export interface AmbientBlurBlobProps {
+interface AmbientBlurBlobProps {
   id?: string;
   size: number;
   color: string;
@@ -18,7 +18,7 @@ export interface AmbientBlurBlobProps {
  * Scoped strictly to its own bounding box so that the surrounding #131315 / #FAF7F2 canvas
  * remains 100% pure and unpolluted by full-screen translucent blur overlays.
  */
-export const AmbientBlurBlob: React.FC<AmbientBlurBlobProps> = ({
+const AmbientBlurBlob: React.FC<AmbientBlurBlobProps> = ({
   id = 'ambientBlob',
   size,
   color,
