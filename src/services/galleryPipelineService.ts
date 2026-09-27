@@ -102,13 +102,6 @@ const queuedPhotoIds = new Set<string>();
 let activeCallbacks: PipelineCallbacks | null = null;
 
 /**
- * Returns true if the background pipeline is actively processing photos.
- */
-function isPipelineActive(): boolean {
-  return isPipelineRunning;
-}
-
-/**
  * Stops any currently running gallery background pipeline and clears queued items.
  */
 export function stopGalleryPipeline(): void {
