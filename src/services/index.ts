@@ -7,7 +7,6 @@ export * from './photoUploadService';
 export * from './photoQualityService';
 export * from './imageCompressionService';
 export * from './galleryPipelineService';
-export * from './mediaReplacementService';
 export * from './photoScoringService';
 export * from './photoBatchingService';
 export * from './photoBatchPersistenceService';
