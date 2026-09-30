@@ -241,13 +241,14 @@ describe('Correct batching of the real 391A2814→391A2819 sequence', () => {
 // ── Time-window edge cases ─────────────────────────────────────────────────────
 
 describe('Time-window edge cases', () => {
-  test('Visually identical photos separated by >3 min land in different batches', () => {
+  test('Visually identical photos separated by >3 min now land in the same batch (pure visual similarity, no time window)', () => {
     const photos: GalleryPhotoItem[] = [
       makePhoto('391A2814.JPG', 0, HOUSE_HASH_A, 0),
-      makePhoto('391A2815.JPG', MAX_INTRA_BATCH_GAP_MS + 1, HOUSE_HASH_A, 0),
+      makePhoto('391A2815.JPG', MAX_INTRA_BATCH_GAP_MS + 100_000, HOUSE_HASH_A, 0),
     ];
     const { newBatches } = runSequentialAlgorithm(photos, null);
-    expect(newBatches).toHaveLength(2);
+    expect(newBatches).toHaveLength(1);
+    expect(newBatches[0].photoIds).toHaveLength(2);
   });
 
   test('Visually similar photos within 3 min land in the same batch', () => {

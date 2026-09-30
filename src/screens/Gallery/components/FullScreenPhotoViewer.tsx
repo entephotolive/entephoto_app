@@ -467,23 +467,17 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
                   styles.headerQualityPill,
                   {
                     backgroundColor:
-                      currentPhoto.qualityResult.blur ||
-                      currentPhoto.qualityResult.overExposure ||
-                      (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen)
+                      currentPhoto.qualityResult.blur || currentPhoto.qualityResult.overExposure
                         ? '#FEF3C7'
                         : '#D1FAE5',
                     borderColor:
-                      currentPhoto.qualityResult.blur ||
-                      currentPhoto.qualityResult.overExposure ||
-                      (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen)
+                      currentPhoto.qualityResult.blur || currentPhoto.qualityResult.overExposure
                         ? '#D97706'
                         : '#059669',
                   },
                 ]}
               >
-                {currentPhoto.qualityResult.blur ||
-                currentPhoto.qualityResult.overExposure ||
-                (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen) ? (
+                {currentPhoto.qualityResult.blur || currentPhoto.qualityResult.overExposure ? (
                   <>
                     <AlertTriangle size={12} color="#92400E" strokeWidth={2.6} />
                     <Text style={styles.headerQualityTextReview}>Review</Text>

@@ -3,8 +3,29 @@ import * as SecureStore from 'expo-secure-store';
 const TOKEN_KEY = 'entephoto_session_token';
 const REFRESH_TOKEN_KEY = 'entephoto_refresh_token';
 const USER_KEY = 'entephoto_user_data';
+const THEME_KEY = 'entephoto_theme_mode';
 
 export const storageService = {
+  async getThemeMode(): Promise<'light' | 'dark' | 'system' | null> {
+    try {
+      const mode = await SecureStore.getItemAsync(THEME_KEY);
+      if (mode === 'light' || mode === 'dark' || mode === 'system') {
+        return mode;
+      }
+      return null;
+    } catch (error) {
+      console.error('[storageService] Failed to get theme mode from SecureStore:', error);
+      return null;
+    }
+  },
+
+  async setThemeMode(mode: 'light' | 'dark' | 'system'): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(THEME_KEY, mode);
+    } catch (error) {
+      console.error('[storageService] Failed to save theme mode to SecureStore:', error);
+    }
+  },
   async getSessionToken(): Promise<string | null> {
     try {
       const token = await SecureStore.getItemAsync(TOKEN_KEY);

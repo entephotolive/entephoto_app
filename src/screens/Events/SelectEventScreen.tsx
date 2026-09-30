@@ -13,11 +13,12 @@ import {
   Modal,
   Alert,
   Animated,
+  Linking,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import {
   Search,
-  SlidersHorizontal,
+  Filter,
   Calendar,
   Image as ImageIcon,
   Check,
@@ -34,6 +35,7 @@ import {
   Shield,
   AlertCircle,
   Globe,
+  Plus,
 } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { AppNavigationProp } from '@/navigation/types';
@@ -46,6 +48,7 @@ import { useAuthStore } from '@/store/authStore';
 import { authService } from '@/services/authService';
 import { formatEventDate } from '@/utils/date';
 import { AppBackground } from '@/components/AppBackground';
+import { ENV } from '@/constants/env';
 
 // Static asset mapping for local illustrations & photos
 const LOCAL_ASSETS: Record<string, any> = {
@@ -216,6 +219,16 @@ export const SelectEventScreen: React.FC = () => {
     );
     openFilterSheet();
   }, [filterPressScale, filterRotate, openFilterSheet]);
+
+  const handleAddEventPress = useCallback(async () => {
+    const targetUrl = `${ENV.REDIRECT_URL.replace(/\/+$/, '')}/photographer/events`;
+    try {
+      await Linking.openURL(targetUrl);
+    } catch (err) {
+      console.warn('[SelectEventScreen] Failed to open create event URL:', targetUrl, err);
+      Alert.alert('Error', 'Unable to open link in browser.');
+    }
+  }, []);
 
   const toggleDraftCategory = useCallback((cat: string) => {
     setDraftCategories(prev => (prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]));
@@ -564,13 +577,13 @@ export const SelectEventScreen: React.FC = () => {
               style={[
                 styles.searchInputContainer,
                 {
-                  backgroundColor: isDark ? '#1A1A1E' : 'rgba(239, 233, 223, 0.65)',
-                  borderColor: isDark ? '#2E2E36' : 'transparent',
+                  backgroundColor: isDark ? '#1A1A1E' : 'rgba(243, 238, 231, 0.85)',
+                  borderColor: isDark ? '#2E2E36' : 'rgba(230, 222, 212, 0.6)',
                 },
               ]}
             >
               <Search
-                size={17}
+                size={18}
                 color={isDark ? '#71717A' : '#756E68'}
                 strokeWidth={2.2}
                 style={styles.searchIcon}
@@ -587,7 +600,31 @@ export const SelectEventScreen: React.FC = () => {
               />
             </View>
 
-            {/* Filter Button — animated */}
+            {/* Add Event Button (+) — matches warm coral/peach clay aesthetic */}
+            <Pressable
+              onPress={handleAddEventPress}
+              accessibilityLabel="Create or manage events in web dashboard"
+              accessibilityRole="button"
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              style={({ pressed }) => [
+                styles.addEventButton,
+                {
+                  backgroundColor: isDark ? 'rgba(255, 107, 74, 0.22)' : '#FFB299',
+                  borderColor: isDark ? '#FF6B4A' : 'rgba(255, 140, 110, 0.35)',
+                  shadowColor: '#FF6B4A',
+                  shadowOpacity: isDark ? 0.35 : 0.45,
+                  shadowRadius: 12,
+                  shadowOffset: { width: 0, height: 5 },
+                  elevation: 7,
+                  opacity: pressed ? 0.85 : 1,
+                  transform: [{ scale: pressed ? 0.94 : 1 }],
+                },
+              ]}
+            >
+              <Plus size={22} color={isDark ? '#FFFFFF' : '#161616'} strokeWidth={2.5} />
+            </Pressable>
+
+            {/* Filter Button — animated funnel filter matching reference */}
             <Animated.View
               style={[styles.filterButtonWrapper, { transform: [{ scale: filterPressScale }] }]}
             >
@@ -600,16 +637,21 @@ export const SelectEventScreen: React.FC = () => {
                   {
                     backgroundColor: hasActiveFilters
                       ? isDark
-                        ? 'rgba(255, 107, 74, 0.18)'
-                        : 'rgba(255, 107, 74, 0.12)'
+                        ? 'rgba(255, 107, 74, 0.22)'
+                        : 'rgba(255, 107, 74, 0.16)'
                       : isDark
                         ? '#1A1A1E'
-                        : 'rgba(239, 233, 223, 0.65)',
-                    borderColor: hasActiveFilters ? '#FF6B4A' : isDark ? '#2E2E36' : 'transparent',
-                    shadowColor: hasActiveFilters ? '#FF6B4A' : 'transparent',
-                    shadowOpacity: hasActiveFilters ? 0.45 : 0,
-                    shadowRadius: hasActiveFilters ? 10 : 0,
-                    elevation: hasActiveFilters ? 6 : 0,
+                        : '#FAF5EE',
+                    borderColor: hasActiveFilters
+                      ? '#FF6B4A'
+                      : isDark
+                        ? '#2E2E36'
+                        : 'rgba(226, 218, 208, 0.8)',
+                    shadowColor: hasActiveFilters ? '#FF6B4A' : '#000000',
+                    shadowOpacity: hasActiveFilters ? 0.4 : isDark ? 0.25 : 0.09,
+                    shadowRadius: hasActiveFilters ? 10 : 8,
+                    shadowOffset: { width: 0, height: 4 },
+                    elevation: hasActiveFilters ? 6 : 3,
                   },
                   pressed && { opacity: 0.85 },
                 ]}
@@ -626,10 +668,10 @@ export const SelectEventScreen: React.FC = () => {
                     ],
                   }}
                 >
-                  <SlidersHorizontal
-                    size={18}
+                  <Filter
+                    size={20}
                     color={hasActiveFilters ? '#FF6B4A' : isDark ? '#F4F4F5' : '#161616'}
-                    strokeWidth={2}
+                    strokeWidth={2.4}
                   />
                 </Animated.View>
                 {/* Active badge dot */}
@@ -1440,7 +1482,7 @@ const styles = StyleSheet.create({
   searchInputContainer: {
     flex: 1,
     height: 48,
-    borderRadius: 16,
+    borderRadius: 24,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
@@ -1908,6 +1950,16 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.plusJakartaSans.bold,
     fontSize: 15,
     fontWeight: '700',
+  },
+
+  // Add Event Button (+)
+  addEventButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // Animated Filter Button

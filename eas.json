@@ -32,7 +32,7 @@
         "EXPO_PUBLIC_API_URL": "https://staging.entephoto.co.in/api",
         "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "1063508208560-doiqsb7e3glfcr2n6cdc87dr5hj256gd.apps.googleusercontent.com",
         "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "1063508208560-hkutc2lvq63mqa0rg3onha67vsgtisev.apps.googleusercontent.com",
-        "EXPO_PUBLIC_PHOTO_STORAGE_PATH": "Download",
+        "EXPO_PUBLIC_PHOTO_STORAGE_PATH": "DCIM/EntePhoto",
         "EXPO_PUBLIC_PHOTO_ALBUM_NAME": "Entephoto"
       }
     },

@@ -23,6 +23,7 @@ import {
   RefreshCw,
   AlertTriangle,
   Star,
+  Clock,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, useFocusEffect, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -90,6 +91,323 @@ export interface GalleryPhotoItem {
 
 type FilterTab = 'All' | 'New' | 'Marked' | 'Uploaded';
 
+interface PhotoGridTileProps {
+  item: GalleryPhotoItem;
+  flatIndex: number;
+  isBestShot?: boolean;
+  isPhotoUploading: boolean;
+  onPressPhoto: (flatIndex: number) => void;
+  onLongPressPhoto: (item: GalleryPhotoItem) => void;
+  onToggleSelect: (id: string) => void;
+  onOpenQualityModal: (item: GalleryPhotoItem) => void;
+}
+
+const PhotoGridTile = React.memo<PhotoGridTileProps>(
+  ({
+    item,
+    flatIndex,
+    isBestShot,
+    isPhotoUploading,
+    onPressPhoto,
+    onLongPressPhoto,
+    onToggleSelect,
+    onOpenQualityModal,
+  }) => {
+    const isSelected = item.selected;
+    const isUploaded = item.status === 'uploaded';
+
+    const isNeedsReview =
+      item.qualityResult && (item.qualityResult.blur || item.qualityResult.overExposure);
+
+    const isQualityPass = item.qualityResult && !isNeedsReview;
+
+    return (
+      <View style={styles.gridCellContainer}>
+        <Pressable
+          onPress={() => onPressPhoto(flatIndex)}
+          onLongPress={() => onLongPressPhoto(item)}
+          style={({ pressed }) => [
+            styles.photoTileWrapper,
+            isSelected && styles.photoTileSelectedBorder,
+            isUploaded && styles.photoTileUploadedDimmed,
+            {
+              transform: [{ scale: pressed ? 0.96 : 1 }],
+            },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={`Open photo ${item.filename || item.id}`}
+        >
+          {/* Main Photo Thumbnail with Skeleton Placeholder */}
+          <ImageWithSkeleton
+            source={{ uri: item.uri }}
+            style={styles.photoImage}
+            containerStyle={styles.photoImageContainer}
+            resizeMode="cover"
+          />
+
+          {/* Top-left Star Best Shot Badge */}
+          {isBestShot && (
+            <View style={styles.tileStarBadge}>
+              <Star size={9} color="#FFFFFF" fill="#FFB800" strokeWidth={0} />
+              <Text style={styles.tileStarBadgeText}>Best</Text>
+            </View>
+          )}
+
+          {/* Bottom-left RAW Tag */}
+          {item.isRaw && (
+            <View style={[styles.rawBadgeContainer, isBestShot && { bottom: 22 }]}>
+              <Text style={styles.rawBadgeText}>RAW</Text>
+            </View>
+          )}
+
+          {/* Bottom-right Quality Indicator Badge */}
+          {item.isAnalyzingQuality ? (
+            <View style={styles.qualityAnalyzingBadge}>
+              <ActivityIndicator size={8} color="#FFFFFF" />
+            </View>
+          ) : isNeedsReview ? (
+            <Pressable
+              onPress={e => {
+                e.stopPropagation();
+                onOpenQualityModal(item);
+              }}
+              hitSlop={8}
+              style={styles.qualityReviewBadge}
+              accessibilityRole="button"
+              accessibilityLabel="Quality review details"
+            >
+              <AlertTriangle size={10} color="#92400E" strokeWidth={2.8} />
+              <Text style={styles.qualityReviewBadgeText}>Review</Text>
+            </Pressable>
+          ) : isQualityPass ? (
+            <Pressable
+              onPress={e => {
+                e.stopPropagation();
+                onOpenQualityModal(item);
+              }}
+              hitSlop={8}
+              style={styles.qualityPassBadge}
+              accessibilityRole="button"
+              accessibilityLabel="Quality passed"
+            >
+              <Check size={9} color="#065F46" strokeWidth={3} />
+              <Text style={styles.qualityPassBadgeText}>Sharp</Text>
+            </Pressable>
+          ) : null}
+
+          {/* Top-right Status / Selection Indicator with independent press hitSlop */}
+          <Pressable
+            onPress={e => {
+              e.stopPropagation();
+              if (!isPhotoUploading) {
+                onToggleSelect(item.id);
+              }
+            }}
+            hitSlop={12}
+            disabled={isPhotoUploading}
+            style={styles.selectionIndicatorContainer}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: isSelected }}
+            accessibilityLabel={`Select photo ${item.filename || item.id}`}
+          >
+            {isPhotoUploading ? (
+              <View style={styles.uploadingSpinnerBadge}>
+                <ActivityIndicator size={11} color="#FFFFFF" />
+              </View>
+            ) : isUploaded ? (
+              <View style={styles.uploadedCloudBadge}>
+                <Cloud size={13} color="#FFFFFF" strokeWidth={2.4} />
+              </View>
+            ) : isSelected ? (
+              <View style={styles.selectedCheckBadge}>
+                <Check size={14} color="#FFFFFF" strokeWidth={3.4} />
+              </View>
+            ) : (
+              <View style={styles.unselectedCircleScrim}>
+                <View style={styles.unselectedHollowRing} />
+              </View>
+            )}
+          </Pressable>
+        </Pressable>
+      </View>
+    );
+  },
+);
+
+PhotoGridTile.displayName = 'PhotoGridTile';
+
+interface BatchSectionHeaderProps {
+  section: GalleryBatchSection;
+  isDark: boolean;
+  onToggleBatchSelection: (batch: RuntimeBatch) => void;
+}
+
+const BatchSectionHeader = React.memo<BatchSectionHeaderProps>(
+  ({ section, isDark, onToggleBatchSelection }) => {
+    if (!section.title) {
+      return null;
+    }
+    const { title, subtitle, batch } = section;
+    const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
+    const isAllBatchSelected =
+      selectablePhotos.length > 0 && selectablePhotos.every(p => p.selected);
+    const photoCount = batch.photos.length;
+    const countLabel = `${photoCount} ${photoCount === 1 ? 'photo' : 'photos'}`;
+
+    return (
+      <View
+        style={[
+          styles.batchHeaderRow,
+          {
+            backgroundColor: isDark ? '#18181D' : '#F5F0E8',
+            borderColor: isDark ? '#2E2E36' : '#E8E2D8',
+          },
+        ]}
+        accessibilityRole="header"
+        accessibilityLabel={`${title}, ${subtitle || ''}, ${countLabel}`}
+      >
+        <View
+          style={[styles.batchHeaderAccent, { backgroundColor: isDark ? '#FF6B4A' : '#161616' }]}
+        />
+
+        {/* Left: Main Batch Title + Subheading with Time */}
+        <View style={styles.batchHeaderTextBlock}>
+          <View style={styles.batchHeaderTitleRow}>
+            <Text style={[styles.batchHeaderLabel, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+              {title}
+            </Text>
+            <View
+              style={[
+                styles.batchHeaderCountBadge,
+                {
+                  backgroundColor: isDark ? '#26262E' : '#FFFFFF',
+                  borderColor: isDark ? '#3F3F46' : '#E0D8CE',
+                },
+              ]}
+            >
+              <Text
+                style={[styles.batchHeaderCountText, { color: isDark ? '#A1A1AA' : '#6B7280' }]}
+              >
+                {countLabel}
+              </Text>
+            </View>
+          </View>
+
+          {/* Subheading: Time */}
+          {Boolean(subtitle) && (
+            <View style={styles.batchHeaderSubtitleRow}>
+              <Clock
+                size={11}
+                color={isDark ? '#A1A1AA' : '#71717A'}
+                strokeWidth={2}
+                style={{ marginRight: 4 }}
+              />
+              <Text
+                style={[styles.batchHeaderSubtitleText, { color: isDark ? '#A1A1AA' : '#71717A' }]}
+              >
+                {subtitle}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Right Action Button: Select All per batch toggle */}
+        {selectablePhotos.length > 0 && (
+          <TouchableOpacity
+            activeOpacity={0.7}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            onPress={() => onToggleBatchSelection(batch)}
+            style={[
+              styles.batchSelectAllBtn,
+              isAllBatchSelected && styles.batchSelectAllBtnActive,
+              {
+                backgroundColor: isAllBatchSelected
+                  ? isDark
+                    ? '#FF6B4A'
+                    : '#161616'
+                  : isDark
+                    ? '#26262E'
+                    : '#FFFFFF',
+                borderColor: isDark ? '#3F3F46' : '#161616',
+              },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              isAllBatchSelected ? 'Deselect all in batch' : 'Select all in batch'
+            }
+          >
+            <Check
+              size={11}
+              color={isAllBatchSelected ? '#FFFFFF' : isDark ? '#A1A1AA' : '#52525B'}
+              strokeWidth={3}
+              style={{ marginRight: 3 }}
+            />
+            <Text
+              style={[
+                styles.batchSelectAllText,
+                {
+                  color: isAllBatchSelected ? '#FFFFFF' : isDark ? '#D4D4D8' : '#161616',
+                },
+              ]}
+            >
+              {isAllBatchSelected ? 'Selected' : 'Select all'}
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  },
+);
+
+BatchSectionHeader.displayName = 'BatchSectionHeader';
+
+interface PhotoGridRowProps {
+  item: GallerySectionRow;
+  uploadingPhotoIds: Set<string>;
+  onPressPhoto: (flatIndex: number) => void;
+  onLongPressPhoto: (photo: GalleryPhotoItem) => void;
+  onToggleSelect: (id: string) => void;
+  onOpenQualityModal: (photo: GalleryPhotoItem) => void;
+}
+
+const PhotoGridRow = React.memo<PhotoGridRowProps>(
+  ({
+    item,
+    uploadingPhotoIds,
+    onPressPhoto,
+    onLongPressPhoto,
+    onToggleSelect,
+    onOpenQualityModal,
+  }) => {
+    if (item.type !== 'grid_row') return null;
+
+    return (
+      <View style={styles.photoRowGroup}>
+        {item.photos.map(({ photo, photoIndex, isBestShot }) => (
+          <PhotoGridTile
+            key={photo.id}
+            item={photo}
+            flatIndex={photoIndex}
+            isBestShot={isBestShot}
+            isPhotoUploading={uploadingPhotoIds.has(photo.id)}
+            onPressPhoto={onPressPhoto}
+            onLongPressPhoto={onLongPressPhoto}
+            onToggleSelect={onToggleSelect}
+            onOpenQualityModal={onOpenQualityModal}
+          />
+        ))}
+        {/* Spacer tiles to keep grid aligned when row has < 3 photos */}
+        {item.photos.length < 3 &&
+          Array.from({ length: 3 - item.photos.length }).map((_, i) => (
+            <View key={`spacer-${i}`} style={styles.gridCellContainer} />
+          ))}
+      </View>
+    );
+  },
+);
+
+PhotoGridRow.displayName = 'PhotoGridRow';
+
 export const PhotoSelectionGalleryScreen: React.FC = () => {
   const navigation = useNavigation<AppNavigationProp>();
   const route = useRoute<RouteProp<AppStackParamList, 'PhotoSelectionGallery'>>();
@@ -106,6 +424,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   // Dynamic photos state (only real photos from DCIM/Entephoto)
   const [photos, setPhotos] = useState<GalleryPhotoItem[]>([]);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [activeFilter, setActiveFilter] = useState<FilterTab>('All');
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
@@ -135,12 +454,48 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   /** True while the first persistence load is running (shows no extra spinner — fallback sync batches are used) */
   const batchLoadedRef = React.useRef(false);
 
+  // Batched photo updates ref & timer to prevent 60+ individual re-renders
+  const pendingUpdatesRef = React.useRef<Map<string, Partial<GalleryPhotoItem>>>(new Map());
+  const flushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushPhotoUpdates = useCallback(() => {
+    if (!isMountedRef.current || pendingUpdatesRef.current.size === 0) return;
+    const batch = new Map(pendingUpdatesRef.current);
+    pendingUpdatesRef.current.clear();
+
+    setPhotos(prev =>
+      prev.map(p => {
+        const update = batch.get(p.id);
+        return update ? { ...p, ...update } : p;
+      }),
+    );
+  }, []);
+
+  const handlePhotoUpdated = useCallback(
+    (update: Partial<GalleryPhotoItem> & { id: string }) => {
+      if (!isMountedRef.current) return;
+      const existing = pendingUpdatesRef.current.get(update.id) || {};
+      pendingUpdatesRef.current.set(update.id, { ...existing, ...update });
+
+      if (!flushTimerRef.current) {
+        flushTimerRef.current = setTimeout(() => {
+          flushTimerRef.current = null;
+          flushPhotoUpdates();
+        }, 150);
+      }
+    },
+    [flushPhotoUpdates],
+  );
+
   // Guard pipeline and state against unmounted screen
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
       stopGalleryPipeline();
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+      }
     };
   }, []);
 
@@ -153,10 +508,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         runGalleryBackgroundPipeline(
           photosToProcess,
           {
-            onPhotoUpdated: update => {
-              if (!isMountedRef.current) return;
-              setPhotos(prev => prev.map(p => (p.id === update.id ? { ...p, ...update } : p)));
-            },
+            onPhotoUpdated: handlePhotoUpdated,
             onAutoFavorite: photoId => {
               if (!isMountedRef.current) return;
               console.log('[PhotoGallery] Auto-favorited passing photo:', photoId);
@@ -166,12 +518,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         );
       });
     },
-    [eventId],
+    [eventId, handlePhotoUpdated],
   );
 
-  // Subscribe to real-time DCIM folder changes
+  // Subscribe to real-time DCIM folder changes (polled every 5s)
   useEffect(() => {
     const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
+      setIsInitialLoading(false);
       setPhotos(prevPhotos => {
         if (prevPhotos.length === 0) {
           triggerPipeline(dcimPhotos);
@@ -231,12 +584,20 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         triggerPipeline(merged);
         return merged;
       });
-    }, 2000);
+    }, 5000);
 
     return () => {
       unsubscribe();
     };
   }, [triggerPipeline]);
+
+  // Safety timeout: Ensure loading spinner never hangs indefinitely
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Manual rescan handler
   const handleManualRescan = useCallback(async () => {
@@ -247,6 +608,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       triggerPipeline(scanned);
     } finally {
       setIsRefreshing(false);
+      setIsInitialLoading(false);
     }
   }, [triggerPipeline]);
 
@@ -818,250 +1180,53 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     [eventId, eventTitle],
   );
 
-  // ── Render: Single Grid Tile (shared for single, batch_photo row types) ──
-  const renderPhotoTile = useCallback(
-    (item: GalleryPhotoItem, flatIndex: number, isBestShot?: boolean) => {
-      const isSelected = item.selected;
-      const isUploaded = item.status === 'uploaded';
-      const isPhotoUploading = uploadingPhotoIds.has(item.id);
+  // ── Callbacks with stable references ──
+  const handlePressPhoto = useCallback((flatIndex: number) => {
+    setViewerInitialIndex(flatIndex);
+    setViewerVisible(true);
+  }, []);
 
-      const isNeedsReview =
-        item.qualityResult &&
-        (item.qualityResult.blur ||
-          item.qualityResult.overExposure ||
-          (item.qualityResult.face && !item.qualityResult.eyesOpen));
+  const handleLongPressPhoto = useCallback((photo: GalleryPhotoItem) => {
+    setSelectedQualityPhoto(photo);
+    setIsQualityModalVisible(true);
+  }, []);
 
-      const isQualityPass = item.qualityResult && !isNeedsReview;
-
-      return (
-        <View style={styles.gridCellContainer}>
-          <Pressable
-            onPress={() => {
-              setViewerInitialIndex(flatIndex);
-              setViewerVisible(true);
-            }}
-            onLongPress={() => {
-              setSelectedQualityPhoto(item);
-              setIsQualityModalVisible(true);
-            }}
-            style={({ pressed }) => [
-              styles.photoTileWrapper,
-              isSelected && styles.photoTileSelectedBorder,
-              isUploaded && styles.photoTileUploadedDimmed,
-              {
-                transform: [{ scale: pressed ? 0.96 : 1 }],
-              },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel={`Open photo ${item.filename || item.id}`}
-          >
-            {/* Main Photo Thumbnail with Skeleton Placeholder (Step 9) */}
-            <ImageWithSkeleton
-              source={{ uri: item.uri }}
-              style={styles.photoImage}
-              containerStyle={styles.photoImageContainer}
-              resizeMode="cover"
-            />
-
-            {/* Top-left Star Best Shot Badge */}
-            {isBestShot && (
-              <View style={styles.tileStarBadge}>
-                <Star size={9} color="#FFFFFF" fill="#FFB800" strokeWidth={0} />
-                <Text style={styles.tileStarBadgeText}>Best</Text>
-              </View>
-            )}
-
-            {/* Bottom-left RAW Tag */}
-            {item.isRaw && (
-              <View style={[styles.rawBadgeContainer, isBestShot && { bottom: 22 }]}>
-                <Text style={styles.rawBadgeText}>RAW</Text>
-              </View>
-            )}
-
-            {/* Bottom-right Quality Indicator Badge */}
-            {item.isAnalyzingQuality ? (
-              <View style={styles.qualityAnalyzingBadge}>
-                <ActivityIndicator size={8} color="#FFFFFF" />
-              </View>
-            ) : isNeedsReview ? (
-              <Pressable
-                onPress={e => {
-                  e.stopPropagation();
-                  setSelectedQualityPhoto(item);
-                  setIsQualityModalVisible(true);
-                }}
-                hitSlop={6}
-                style={styles.qualityReviewBadge}
-                accessibilityRole="button"
-                accessibilityLabel="Quality review details"
-              >
-                <AlertTriangle size={10} color="#92400E" strokeWidth={2.8} />
-                <Text style={styles.qualityReviewBadgeText}>Review</Text>
-              </Pressable>
-            ) : isQualityPass ? (
-              <Pressable
-                onPress={e => {
-                  e.stopPropagation();
-                  setSelectedQualityPhoto(item);
-                  setIsQualityModalVisible(true);
-                }}
-                hitSlop={6}
-                style={styles.qualityPassBadge}
-                accessibilityRole="button"
-                accessibilityLabel="Quality passed"
-              >
-                <Check size={9} color="#065F46" strokeWidth={3} />
-                <Text style={styles.qualityPassBadgeText}>Sharp</Text>
-              </Pressable>
-            ) : null}
-
-            {/* Top-right Status / Selection Indicator with independent press hitSlop */}
-            <Pressable
-              onPress={e => {
-                e.stopPropagation();
-                if (!isPhotoUploading) {
-                  togglePhotoSelection(item.id);
-                }
-              }}
-              hitSlop={10}
-              disabled={isPhotoUploading}
-              style={styles.selectionIndicatorContainer}
-              accessibilityRole="checkbox"
-              accessibilityState={{ checked: isSelected }}
-              accessibilityLabel={`Select photo ${item.filename || item.id}`}
-            >
-              {isPhotoUploading ? (
-                <View style={styles.uploadingSpinnerBadge}>
-                  <ActivityIndicator size={11} color="#FFFFFF" />
-                </View>
-              ) : isUploaded ? (
-                <View style={styles.uploadedCloudBadge}>
-                  <Cloud size={13} color="#FFFFFF" strokeWidth={2.4} />
-                </View>
-              ) : isSelected ? (
-                <View style={styles.selectedCheckBadge}>
-                  <Check size={14} color="#FFFFFF" strokeWidth={3.4} />
-                </View>
-              ) : (
-                <View style={styles.unselectedCircleScrim}>
-                  <View style={styles.unselectedHollowRing} />
-                </View>
-              )}
-            </Pressable>
-          </Pressable>
-        </View>
-      );
-    },
-    [togglePhotoSelection, uploadingPhotoIds],
-  );
+  const handleOpenQualityModal = useCallback((photo: GalleryPhotoItem) => {
+    setSelectedQualityPhoto(photo);
+    setIsQualityModalVisible(true);
+  }, []);
 
   // ── Render: Batch Section Header (SectionList) ───────────────────────────
   const renderSectionHeader = useCallback(
-    ({ section }: { section: GalleryBatchSection }) => {
-      const { title, batch } = section;
-      const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
-      const isAllBatchSelected =
-        selectablePhotos.length > 0 &&
-        selectablePhotos.every(p => {
-          const livePhoto = photos.find(item => item.id === p.id);
-          return livePhoto?.selected;
-        });
-
-      return (
-        <View
-          style={[
-            styles.batchHeaderRow,
-            {
-              backgroundColor: isDark ? '#18181D' : '#F5F0E8',
-              borderColor: isDark ? '#2E2E36' : '#E8E2D8',
-            },
-          ]}
-          accessibilityRole="header"
-          accessibilityLabel={title}
-        >
-          <View
-            style={[styles.batchHeaderAccent, { backgroundColor: isDark ? '#FF6B4A' : '#161616' }]}
-          />
-
-          {/* Left: Clean Header Title (Time + Batch + Photo Count) */}
-          <View style={styles.batchHeaderTextBlock}>
-            <View style={styles.batchHeaderTitleRow}>
-              <Text style={[styles.batchHeaderLabel, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                {title}
-              </Text>
-            </View>
-          </View>
-
-          {/* Right Action Button: Select All per batch toggle */}
-          {selectablePhotos.length > 0 && (
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={() => toggleBatchSelection(batch)}
-              style={[
-                styles.batchSelectAllBtn,
-                isAllBatchSelected && styles.batchSelectAllBtnActive,
-                {
-                  backgroundColor: isAllBatchSelected
-                    ? isDark
-                      ? '#FF6B4A'
-                      : '#161616'
-                    : isDark
-                      ? '#26262E'
-                      : '#FFFFFF',
-                  borderColor: isDark ? '#3F3F46' : '#161616',
-                },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel={
-                isAllBatchSelected ? 'Deselect all in batch' : 'Select all in batch'
-              }
-            >
-              <Check
-                size={11}
-                color={isAllBatchSelected ? '#FFFFFF' : isDark ? '#A1A1AA' : '#52525B'}
-                strokeWidth={3}
-                style={{ marginRight: 3 }}
-              />
-              <Text
-                style={[
-                  styles.batchSelectAllText,
-                  {
-                    color: isAllBatchSelected ? '#FFFFFF' : isDark ? '#D4D4D8' : '#161616',
-                  },
-                ]}
-              >
-                {isAllBatchSelected ? 'Selected' : 'Select all'}
-              </Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      );
-    },
-    [isDark, photos, toggleBatchSelection],
+    ({ section }: { section: GalleryBatchSection }) => (
+      <BatchSectionHeader
+        section={section}
+        isDark={isDark}
+        onToggleBatchSelection={toggleBatchSelection}
+      />
+    ),
+    [isDark, toggleBatchSelection],
   );
 
   // ── Render: Section Item (3-Column Grid Row for all batch photos) ──────────
   const renderSectionItem = useCallback(
-    ({ item }: { item: GallerySectionRow }) => {
-      if (item.type !== 'grid_row') return null;
-
-      // Grid Row: 3-column items with skeleton placeholders
-      return (
-        <View style={styles.photoRowGroup}>
-          {item.photos.map(({ photo, photoIndex, isBestShot }) => (
-            <React.Fragment key={photo.id}>
-              {renderPhotoTile(photo, photoIndex, isBestShot)}
-            </React.Fragment>
-          ))}
-          {/* Spacer tiles to keep grid aligned when row has < 3 photos */}
-          {item.photos.length < 3 &&
-            Array.from({ length: 3 - item.photos.length }).map((_, i) => (
-              <View key={`spacer-${i}`} style={styles.gridCellContainer} />
-            ))}
-        </View>
-      );
-    },
-    [renderPhotoTile],
+    ({ item }: { item: GallerySectionRow }) => (
+      <PhotoGridRow
+        item={item}
+        uploadingPhotoIds={uploadingPhotoIds}
+        onPressPhoto={handlePressPhoto}
+        onLongPressPhoto={handleLongPressPhoto}
+        onToggleSelect={togglePhotoSelection}
+        onOpenQualityModal={handleOpenQualityModal}
+      />
+    ),
+    [
+      uploadingPhotoIds,
+      handlePressPhoto,
+      handleLongPressPhoto,
+      togglePhotoSelection,
+      handleOpenQualityModal,
+    ],
   );
 
   return (
@@ -1240,54 +1405,81 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           windowSize={7}
           removeClippedSubviews={true}
           stickySectionHeadersEnabled={false}
-          ListEmptyComponent={() => (
-            <View style={styles.emptyContainer}>
-              <View
-                style={[
-                  styles.emptyIconCircle,
-                  {
-                    backgroundColor: isDark ? '#26262E' : '#FFE5D9',
-                    borderColor: isDark ? '#3F3F46' : '#161616',
-                  },
-                ]}
-              >
-                <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
-              </View>
-              <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
-              </Text>
-              <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-                Connect your camera or copy photo files into {'\n'}
-                <Text style={{ fontWeight: '700', color: isDark ? '#F4F4F5' : '#161616' }}>
-                  {CANONICAL_DCIM_DIR_URI}
-                </Text>
-              </Text>
-              <TouchableOpacity
-                activeOpacity={0.8}
-                onPress={handleManualRescan}
-                disabled={isRefreshing}
-                style={[
-                  styles.emptyRefreshBtn,
-                  {
-                    backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                    borderColor: isDark ? '#2E2E36' : '#161616',
-                  },
-                ]}
-              >
-                <RefreshCw
-                  size={16}
-                  color={isDark ? '#F4F4F5' : '#161616'}
-                  strokeWidth={2.2}
-                  style={{ marginRight: 8 }}
-                />
-                <Text
-                  style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+          ListEmptyComponent={() =>
+            isInitialLoading || isRefreshing ? (
+              <View style={styles.emptyContainer}>
+                <View
+                  style={[
+                    styles.emptyIconCircle,
+                    {
+                      backgroundColor: isDark ? '#26262E' : '#FFE5D9',
+                      borderColor: isDark ? '#3F3F46' : '#161616',
+                    },
+                  ]}
                 >
-                  {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
+                  <ActivityIndicator size="small" color={isDark ? '#FFA07A' : '#161616'} />
+                </View>
+                <Text
+                  style={[
+                    styles.emptyTitle,
+                    { color: isDark ? '#F4F4F5' : '#161616', marginTop: 14 },
+                  ]}
+                >
+                  Loading Photos…
                 </Text>
-              </TouchableOpacity>
-            </View>
-          )}
+                <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Scanning {PHOTO_STORAGE_DISPLAY_PATH} for camera captures
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.emptyContainer}>
+                <View
+                  style={[
+                    styles.emptyIconCircle,
+                    {
+                      backgroundColor: isDark ? '#26262E' : '#FFE5D9',
+                      borderColor: isDark ? '#3F3F46' : '#161616',
+                    },
+                  ]}
+                >
+                  <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
+                </View>
+                <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                  {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
+                </Text>
+                <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Connect your camera or copy photo files into {'\n'}
+                  <Text style={{ fontWeight: '700', color: isDark ? '#F4F4F5' : '#161616' }}>
+                    {CANONICAL_DCIM_DIR_URI}
+                  </Text>
+                </Text>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={handleManualRescan}
+                  disabled={isRefreshing}
+                  style={[
+                    styles.emptyRefreshBtn,
+                    {
+                      backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
+                      borderColor: isDark ? '#2E2E36' : '#161616',
+                    },
+                  ]}
+                >
+                  <RefreshCw
+                    size={16}
+                    color={isDark ? '#F4F4F5' : '#161616'}
+                    strokeWidth={2.2}
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text
+                    style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                  >
+                    {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )
+          }
         />
 
         {/* ── 4. FLOATING BOTTOM ACTION DOCK ── */}
@@ -1643,6 +1835,27 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     letterSpacing: -0.2,
+  },
+  batchHeaderCountBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  batchHeaderCountText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 9.5,
+    fontWeight: '700',
+  },
+  batchHeaderSubtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  batchHeaderSubtitleText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 11,
+    fontWeight: '600',
   },
   batchHeaderTag: {
     paddingHorizontal: 6,

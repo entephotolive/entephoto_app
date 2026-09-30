@@ -10,18 +10,7 @@ import {
   Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import {
-  X,
-  AlertTriangle,
-  CheckCircle2,
-  Eye,
-  EyeOff,
-  Sun,
-  Camera,
-  Activity,
-  User,
-  Users,
-} from 'lucide-react-native';
+import { X, AlertTriangle, CheckCircle2, Sun, Camera, Activity, Layers } from 'lucide-react-native';
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
 import { BLUR_THRESHOLD, EXPOSURE_THRESHOLD } from '@/services/photoQualityService';
@@ -64,8 +53,7 @@ export const PhotoQualityModal: React.FC<PhotoQualityModalProps> = ({
 
   const hasBlur = result?.blur ?? false;
   const hasOverExposure = result?.overExposure ?? false;
-  const hasClosedEyes = result?.face && !(result?.eyesOpen ?? true);
-  const needsReview = hasBlur || hasOverExposure || hasClosedEyes;
+  const needsReview = hasBlur || hasOverExposure;
 
   return (
     <Modal
@@ -252,55 +240,14 @@ export const PhotoQualityModal: React.FC<PhotoQualityModalProps> = ({
                   </Text>
                 </View>
 
-                {/* 3. Face Detection */}
-                <View
-                  style={[
-                    styles.checkCard,
-                    {
-                      backgroundColor: isDark ? '#27272A' : '#FFFFFF',
-                      borderColor: isDark ? '#3F3F46' : '#161616',
-                    },
-                  ]}
-                >
-                  <View style={styles.checkCardHeader}>
-                    <View
-                      style={[
-                        styles.checkBadge,
-                        {
-                          backgroundColor: isDark ? '#3F3F46' : '#F4F4F5',
-                          borderColor: isDark ? '#52525B' : '#71717A',
-                        },
-                      ]}
-                    >
-                      {result.faceCount && result.faceCount > 1 ? (
-                        <Users size={14} color={isDark ? '#E4E4E7' : '#161616'} strokeWidth={2.5} />
-                      ) : (
-                        <User size={14} color={isDark ? '#E4E4E7' : '#161616'} strokeWidth={2.5} />
-                      )}
-                      <Text
-                        style={[styles.checkBadgeText, { color: isDark ? '#E4E4E7' : '#161616' }]}
-                      >
-                        {result.face ? `${result.faceCount} Face(s)` : 'No Faces'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text
-                    style={[styles.checkDescription, { color: isDark ? '#A1A1AA' : '#52525B' }]}
-                  >
-                    {result.face
-                      ? `Detected ${result.faceCount} subject face(s) via ML Kit.`
-                      : 'Landscape, decor, or object shot (no human faces found).'}
-                  </Text>
-                </View>
-
-                {/* 4. Eyes Open Check (if faces detected) */}
-                {result.face && (
+                {/* 3. Visual Hash & Structure */}
+                {result.pHash && (
                   <View
                     style={[
                       styles.checkCard,
                       {
                         backgroundColor: isDark ? '#27272A' : '#FFFFFF',
-                        borderColor: hasClosedEyes ? '#F59E0B' : isDark ? '#3F3F46' : '#161616',
+                        borderColor: isDark ? '#3F3F46' : '#161616',
                       },
                     ]}
                   >
@@ -309,35 +256,30 @@ export const PhotoQualityModal: React.FC<PhotoQualityModalProps> = ({
                         style={[
                           styles.checkBadge,
                           {
-                            backgroundColor: hasClosedEyes ? '#FEF3C7' : '#ECFDF5',
-                            borderColor: hasClosedEyes ? '#D97706' : '#10B981',
+                            backgroundColor: isDark ? '#3F3F46' : '#F4F4F5',
+                            borderColor: isDark ? '#52525B' : '#71717A',
                           },
                         ]}
                       >
-                        {hasClosedEyes ? (
-                          <EyeOff size={14} color="#D97706" strokeWidth={2.5} />
-                        ) : (
-                          <Eye size={14} color="#059669" strokeWidth={2.5} />
-                        )}
+                        <Layers
+                          size={14}
+                          color={isDark ? '#E4E4E7' : '#161616'}
+                          strokeWidth={2.5}
+                        />
                         <Text
-                          style={[
-                            styles.checkBadgeText,
-                            { color: hasClosedEyes ? '#D97706' : '#059669' },
-                          ]}
+                          style={[styles.checkBadgeText, { color: isDark ? '#E4E4E7' : '#161616' }]}
                         >
-                          {hasClosedEyes ? 'Closed Eyes' : 'Eyes Open'}
+                          Visual Hash
                         </Text>
                       </View>
-                      <Text style={[styles.scoreValue, { color: isDark ? '#E4E4E7' : '#27272A' }]}>
-                        {result.closedEyeCount ?? 0} of {result.faceCount ?? 0} closed
+                      <Text style={[styles.scoreValue, { color: isDark ? '#A1A1AA' : '#52525B' }]}>
+                        {result.pHash.slice(0, 8)}...
                       </Text>
                     </View>
                     <Text
                       style={[styles.checkDescription, { color: isDark ? '#A1A1AA' : '#52525B' }]}
                     >
-                      {hasClosedEyes
-                        ? `${result.closedEyeCount} person(s) appear to have closed eyes (< 50% open probability).`
-                        : 'All detected subjects have their eyes open.'}
+                      64-bit structural perceptual hash for burst clustering & pose alignment.
                     </Text>
                   </View>
                 )}

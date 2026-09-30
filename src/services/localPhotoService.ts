@@ -147,21 +147,69 @@ export async function scanDcimEntephotoPhotos(
   }
 
   try {
-    const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+    // 1. Try primary configured directory first
+    let activeDirUri = CANONICAL_DCIM_DIR_URI;
+    let dir = new Directory(activeDirUri);
 
+    // Auto-create configured directory if it does not exist
     if (!dir.exists) {
+      try {
+        dir.create({ intermediates: true });
+        console.log(`[LocalPhotoService] Created directory: ${activeDirUri}`);
+      } catch {
+        // Ignore if restricted
+      }
+    }
+
+    let entries = dir.exists ? dir.list() : [];
+    let photoEntries = entries.filter((entry): entry is File => {
+      return entry instanceof File && isPhotoFile(entry.name);
+    });
+
+    // 2. Fallback: If configured directory has 0 photos, check common camera/download directories
+    if (photoEntries.length === 0) {
+      const fallbackUris = [
+        activeDirUri.includes('Entephoto')
+          ? activeDirUri.replace(/Entephoto$/i, 'EntePhoto')
+          : 'file:///sdcard/DCIM/EntePhoto',
+        'file:///sdcard/DCIM/Entephoto',
+        'file:///sdcard/Download',
+        'file:///sdcard/DCIM/Camera',
+        'file:///sdcard/Pictures',
+      ].filter(u => u.toLowerCase() !== activeDirUri.toLowerCase());
+
+      for (const fallbackUri of fallbackUris) {
+        try {
+          const fbDir = new Directory(fallbackUri);
+          if (fbDir.exists) {
+            const fbEntries = fbDir.list();
+            const fbPhotos = fbEntries.filter(
+              (e): e is File => e instanceof File && isPhotoFile(e.name),
+            );
+            if (fbPhotos.length > 0) {
+              console.log(
+                `[LocalPhotoService] Found ${fbPhotos.length} photos in fallback directory: ${fallbackUri}`,
+              );
+              activeDirUri = fallbackUri;
+              dir = fbDir;
+              photoEntries = fbPhotos;
+              break;
+            }
+          }
+        } catch {
+          // Continue to next candidate
+        }
+      }
+    }
+
+    if (photoEntries.length === 0) {
       if (!silent) {
-        console.warn(
-          `[LocalPhotoService] Directory does not exist on device: ${CANONICAL_DCIM_DIR_URI}`,
+        console.log(
+          `[LocalPhotoService] No photos found in ${activeDirUri} or standard fallback directories.`,
         );
       }
       return [];
     }
-
-    const entries = dir.list();
-    const photoEntries = entries.filter((entry): entry is File => {
-      return entry instanceof File && isPhotoFile(entry.name);
-    });
 
     // Lookup existing MediaLibrary assets in the configured album if available
     const mediaAssetsByFilename = new Map<string, string>();
@@ -199,7 +247,7 @@ export async function scanDcimEntephotoPhotos(
       }
 
       return {
-        id: realAssetId || `dcim-${file.name}-${index}`,
+        id: realAssetId || `dcim-${file.name}`,
         assetId: realAssetId,
         uri: file.uri,
         filename: file.name,
@@ -219,6 +267,7 @@ export async function scanDcimEntephotoPhotos(
         iso: undefined,
         shutter: undefined,
         qualityResult: cachedQuality,
+        pHash: cachedQuality?.pHash,
         isAnalyzingQuality: false,
       };
     });
@@ -250,7 +299,9 @@ export function subscribeToDcimPhotos(
   let isSubscribed = true;
   let watcherSubscription: { remove: () => void } | null = null;
   let intervalId: ReturnType<typeof setInterval> | null = null;
-  let lastSignature = '';
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastEmittedIds = new Set<string>();
+  let isFirstEmit = true;
 
   const scanAndNotify = async (silent: boolean = true) => {
     if (!isSubscribed) return;
@@ -258,54 +309,113 @@ export function subscribeToDcimPhotos(
       const photos = await scanDcimEntephotoPhotos(silent);
       if (!isSubscribed) return;
 
-      const signature = photos.map(p => p.uri).join('|');
-      if (signature !== lastSignature) {
-        lastSignature = signature;
+      const newIds = new Set(photos.map(p => p.id));
+      let hasChanged = newIds.size !== lastEmittedIds.size;
+      if (!hasChanged) {
+        for (const id of newIds) {
+          if (!lastEmittedIds.has(id)) {
+            hasChanged = true;
+            break;
+          }
+        }
+      }
+
+      if (hasChanged || isFirstEmit) {
+        isFirstEmit = false;
+        lastEmittedIds = newIds;
         console.log(`[LocalPhotoService] Emitting ${photos.length} updated photos to gallery`);
         onPhotosUpdated(photos);
       }
     } catch (error) {
       console.error('[LocalPhotoService] Error during watch check:', error);
+      if (isFirstEmit) {
+        isFirstEmit = false;
+        onPhotosUpdated([]);
+      }
     }
+  };
+
+  const debouncedScanAndNotify = (silent: boolean = true) => {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      if (isSubscribed) {
+        scanAndNotify(silent);
+      }
+    }, 500);
+  };
+
+  const tryStartWatcher = (): boolean => {
+    if (Platform.OS === 'android' && !watcherSubscription) {
+      try {
+        const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+        if (dir.exists) {
+          watcherSubscription = dir.watch(() => {
+            console.log(
+              '[LocalPhotoService] Directory change event detected via Directory.watch()',
+            );
+            debouncedScanAndNotify(true);
+          });
+          console.log('[LocalPhotoService] Directory.watch() active; polling interval disabled.');
+          if (intervalId !== null) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          return true;
+        }
+      } catch (err) {
+        console.warn(
+          '[LocalPhotoService] Directory.watch() not supported on target directory, falling back to interval:',
+          err,
+        );
+      }
+    }
+    return false;
   };
 
   // 1. Initial request on subscription start
   requestStoragePermission().then(granted => {
-    if (granted && isSubscribed) {
-      scanAndNotify(false);
+    if (isSubscribed) {
+      if (granted) {
+        scanAndNotify(false);
+        if (!watcherSubscription) {
+          const started = tryStartWatcher();
+          if (!started && intervalId === null) {
+            intervalId = setInterval(() => debouncedScanAndNotify(true), pollIntervalMs);
+          }
+        }
+      } else {
+        // If permission denied, still emit empty array so the initial loading spinner clears!
+        isFirstEmit = false;
+        onPhotosUpdated([]);
+      }
     }
   });
 
   // 2. Set up native directory watcher if directory exists
-  if (Platform.OS === 'android') {
-    try {
-      const dir = new Directory(CANONICAL_DCIM_DIR_URI);
-      if (dir.exists) {
-        watcherSubscription = dir.watch(() => {
-          console.log('[LocalPhotoService] Directory change event detected via Directory.watch()');
-          scanAndNotify();
-        });
-      }
-    } catch (err) {
-      console.warn(
-        '[LocalPhotoService] Directory.watch() not supported on target directory, falling back to interval:',
-        err,
-      );
-    }
-  }
+  const watcherActive = tryStartWatcher();
 
-  // 3. Polling interval to ensure newly added camera photos show up immediately
-  intervalId = setInterval(scanAndNotify, pollIntervalMs);
+  // 3. Fallback polling ONLY if native watcher is not active
+  if (!watcherActive) {
+    intervalId = setInterval(() => debouncedScanAndNotify(true), pollIntervalMs);
+  }
 
   return () => {
     isSubscribed = false;
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     if (watcherSubscription) {
       try {
         watcherSubscription.remove();
       } catch {}
+      watcherSubscription = null;
     }
-    if (intervalId) {
+    if (intervalId !== null) {
       clearInterval(intervalId);
+      intervalId = null;
     }
   };
 }

@@ -87,9 +87,25 @@ export interface PersistedBatch {
   bestShotPhotoId?: string | null;
 }
 
-// ── Storage ────────────────────────────────────────────────────────────────────
+const BATCH_CACHE_PATH = `${FileSystem.documentDirectory}ente_batch_cache_v3.json`;
 
-const BATCH_CACHE_PATH = `${FileSystem.documentDirectory}ente_batch_cache.json`;
+/**
+ * Clears all in-memory and disk persisted batches.
+ */
+export async function clearAllPersistedBatches(): Promise<void> {
+  batchById.clear();
+  batchIdByPhotoId.clear();
+  lastOpenBatchId = null;
+  isLoaded = true;
+  try {
+    const info = await FileSystem.getInfoAsync(BATCH_CACHE_PATH);
+    if (info.exists) {
+      await FileSystem.deleteAsync(BATCH_CACHE_PATH, { idempotent: true });
+    }
+  } catch (err) {
+    console.warn('[BatchPersistence] Failed to delete cache file:', err);
+  }
+}
 
 interface DiskSchema {
   batches: Record<string, PersistedBatch>;
@@ -296,6 +312,18 @@ export async function saveBatchResults(batches: PersistedBatch[]): Promise<void>
   // Single disk flush for all batches
   scheduleFlush();
   console.log(`[BatchPersistence] Saved ${batches.length} new batch(es) to disk.`);
+}
+
+/**
+ * Updates an existing persisted batch record (e.g. when lastPhotoHash or bestShotPhotoId changes).
+ */
+export async function updateBatch(batch: PersistedBatch): Promise<void> {
+  await ensureLoaded();
+  batchById.set(batch.id, batch);
+  for (const photoId of batch.photoIds) {
+    batchIdByPhotoId.set(photoId, batch.id);
+  }
+  scheduleFlush();
 }
 
 /**

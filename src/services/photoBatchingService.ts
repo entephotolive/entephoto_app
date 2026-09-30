@@ -59,33 +59,40 @@
  */
 
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
-import { computeHammingDistance, VISUAL_SIMILARITY_HAMMING_THRESHOLD } from './photoQualityService';
-import { selectBestShotId } from './photoScoringService';
+import {
+  extractFeaturesInChunks,
+  clusterPhotosByVisualSimilarity,
+  selectClusterBestShot,
+  computeDHashHammingDistance,
+  computeColorHistogramDistance,
+  DHASH_DISTANCE_THRESHOLD,
+  COLOR_HISTOGRAM_TOLERANCE,
+  selectBestShotId,
+} from './photoScoringService';
 import {
   PersistedBatch,
-  getLastOpenBatch,
   getUnassignedPhotoIds,
   saveBatchResults,
-  appendPhotoToBatch,
   getAllPersistedBatches,
   repairProvisionalBatches,
   hasProvisionalBatches,
+  getLastOpenBatch,
+  appendPhotoToBatch,
 } from './photoBatchPersistenceService';
 
 // ── Tuning Constants ───────────────────────────────────────────────────────────
 
 /**
- * Maximum time gap (ms) between consecutive photos within the same batch.
- * Photos arriving more than this apart always start a new batch, even if
- * face counts and visual hashes match. Default: 3 minutes.
+ * @deprecated Time-based batch gating has been eliminated in favor of pure visual clustering.
+ * Retained for backwards compatibility with legacy tests.
  */
-export const MAX_INTRA_BATCH_GAP_MS = 3 * 60 * 1000; // 3 minutes
+export const MAX_INTRA_BATCH_GAP_MS = 3 * 60 * 1000;
 
 /**
  * Minimum number of photos in a batch for it to be rendered as a labeled
  * "similar" group in the UI. Singletons are always shown ungrouped.
  */
-const MIN_BATCH_SIZE_FOR_LABEL = 2;
+export const MIN_BATCH_SIZE_FOR_LABEL = 2;
 
 // ── Internal Runtime State (computation only — not persisted directly) ─────────
 
@@ -143,7 +150,7 @@ function stableId(photo: GalleryPhotoItem): string {
 }
 
 function checkSimilarityWithDiagnostics(
-  _candidatePhoto: GalleryPhotoItem,
+  candidatePhoto: GalleryPhotoItem,
   candidateMs: number,
   candidateHash: string | null,
   current: RuntimeBatch,
@@ -151,23 +158,42 @@ function checkSimilarityWithDiagnostics(
   const timeSinceLastMs = Math.abs(candidateMs - current.lastPhotoTimeMs);
   const compareHash = current.lastPhotoHash || current.representativeHash;
   const hashDistance =
-    candidateHash && compareHash ? computeHammingDistance(candidateHash, compareHash) : 'N/A';
+    candidateHash && compareHash ? computeDHashHammingDistance(candidateHash, compareHash) : 'N/A';
 
-  // Gate 1: Time proximity
-  if (timeSinceLastMs > MAX_INTRA_BATCH_GAP_MS) {
-    const reason = `Time gap exceeded (${timeSinceLastMs}ms > ${MAX_INTRA_BATCH_GAP_MS}ms window)`;
+  // 1. TEMPORAL CONTINUITY GATING
+  // Burst shots of the exact same pose occur in rapid succession (< 15-30s).
+  // Changing poses (e.g. couple adjusting posture/look) takes time (> 45s), starting a new batch.
+  const MAX_BURST_GAP_MS = 45 * 1000;
+  if (current.lastPhotoTimeMs > 0 && candidateMs > 0 && timeSinceLastMs > MAX_BURST_GAP_MS) {
+    const reason = `Time gap exceeded burst window (${Math.round(timeSinceLastMs / 1000)}s > ${MAX_BURST_GAP_MS / 1000}s)`;
     return { isSimilar: false, reason, hashDistance, timeSinceLastMs };
   }
 
-  // Gate 2 (PRIMARY & SOLE VISUAL CRITERION): Visual Perceptual Hash (dHash)
-  if (candidateHash && compareHash && typeof hashDistance === 'number') {
-    if (hashDistance > VISUAL_SIMILARITY_HAMMING_THRESHOLD) {
-      const reason = `Hash distance exceeded threshold (${hashDistance} > ${VISUAL_SIMILARITY_HAMMING_THRESHOLD})`;
+  // 2. FACE COUNT CONSISTENCY GATING
+  // If face analysis has run on both photos, ensure human subject count matches.
+  // If people enter or leave the frame (face count increases or decreases), it's a NEW batch.
+  const candidateFaceCount = getFaceCount(candidatePhoto);
+  const repFaceCount = current.representativeFaceCount;
+  if (candidateFaceCount !== null && repFaceCount !== null) {
+    if (candidateFaceCount !== repFaceCount) {
+      const reason = `Face count changed (${repFaceCount} -> ${candidateFaceCount} people)`;
       return { isSimilar: false, reason, hashDistance, timeSinceLastMs };
     }
   }
 
-  const reason = `Visual similarity check passed (time ${timeSinceLastMs}ms, hash dist ${hashDistance})`;
+  // 3. VISUAL PERCEPTUAL HASH (dHash)
+  if (candidateHash && compareHash && typeof hashDistance === 'number') {
+    // If 0 faces (scenery/decor/rings/stage), require tighter similarity threshold
+    const effectiveThreshold =
+      candidateFaceCount === 0 && repFaceCount === 0 ? 10 : DHASH_DISTANCE_THRESHOLD;
+
+    if (hashDistance > effectiveThreshold) {
+      const reason = `Hash distance exceeded threshold (${hashDistance} > ${effectiveThreshold})`;
+      return { isSimilar: false, reason, hashDistance, timeSinceLastMs };
+    }
+  }
+
+  const reason = `Visual similarity check passed (hash dist ${hashDistance})`;
   return { isSimilar: true, reason, hashDistance, timeSinceLastMs };
 }
 
@@ -175,23 +201,34 @@ function checkSimilarityWithDiagnostics(
 // isSimilarToPersisted() is retained solely for the one-shot cross-session seed check.
 
 function isSimilarToPersisted(
+  candidatePhoto: GalleryPhotoItem,
   candidateMs: number,
   candidateHash: string | null,
   persisted: PersistedBatch,
 ): boolean {
-  const persistedEndMs = Date.parse(persisted.endTime);
-  if (isNaN(persistedEndMs)) return false;
+  const timeSinceLastMs = persisted.endTime
+    ? Math.abs(candidateMs - new Date(persisted.endTime).getTime())
+    : 0;
 
-  // Gate 1: Time proximity
-  if (Math.abs(candidateMs - persistedEndMs) > MAX_INTRA_BATCH_GAP_MS) {
+  const MAX_BURST_GAP_MS = 45 * 1000;
+  if (timeSinceLastMs > MAX_BURST_GAP_MS && timeSinceLastMs > 0) {
     return false;
   }
 
-  // Gate 2 (PRIMARY & SOLE VISUAL CRITERION): Visual Perceptual Hash
+  const candidateFaceCount = getFaceCount(candidatePhoto);
+  const repFaceCount = persisted.representativeFaceCount;
+  if (candidateFaceCount !== null && repFaceCount !== null) {
+    if (candidateFaceCount !== repFaceCount) {
+      return false;
+    }
+  }
+
   const compareHash = persisted.lastPhotoHash || persisted.representativeHash;
   if (candidateHash && compareHash) {
-    const dist = computeHammingDistance(candidateHash, compareHash);
-    if (dist > VISUAL_SIMILARITY_HAMMING_THRESHOLD) {
+    const dist = computeDHashHammingDistance(candidateHash, compareHash);
+    const threshold =
+      candidateFaceCount === 0 && repFaceCount === 0 ? 10 : DHASH_DISTANCE_THRESHOLD;
+    if (dist > threshold) {
       return false;
     }
   }
@@ -280,7 +317,7 @@ function runSequentialAlgorithm(
 
     if (extendingSeed && seedBatch) {
       // First priority: try to append to the persisted seed batch
-      const isSim = isSimilarToPersisted(photoMs, photoHash, seedBatch);
+      const isSim = isSimilarToPersisted(photo, photoMs, photoHash, seedBatch);
       if (isSim) {
         seedAppends.push({
           stablePhotoId: sid,
@@ -315,16 +352,6 @@ function runSequentialAlgorithm(
       };
     } else {
       const diag = checkSimilarityWithDiagnostics(photo, photoMs, photoHash, currentRuntime);
-      const repPhoto = currentRuntime.photos[currentRuntime.photos.length - 1];
-      const repName = repPhoto?.filename || currentRuntime.id;
-
-      console.log(
-        `[Batching] Comparing ${photo.filename || photo.id} vs current batch rep ${repName}:\n` +
-          `  hashDistance = ${diag.hashDistance} (threshold = ${VISUAL_SIMILARITY_HAMMING_THRESHOLD})\n` +
-          `  timeSinceLastPhoto = ${diag.timeSinceLastMs}ms (window = ${MAX_INTRA_BATCH_GAP_MS}ms)\n` +
-          `  decision = ${diag.isSimilar ? 'SAME_BATCH' : 'NEW_BATCH'}\n` +
-          `  reason = ${diag.reason}`,
-      );
 
       if (diag.isSimilar) {
         currentRuntime.photoIds.push(sid);
@@ -391,9 +418,6 @@ export async function assignPhotoBatchesPersisted(
   const stableIds = photos.map(stableId);
 
   // Step 0: Repair any batches that were frozen with null representative data
-  // (race condition: analysis hadn't finished when the batch was first created).
-  // PERFORMANCE GUARD: hasProvisionalBatches() is O(1) — skip the expensive
-  // repair pass entirely when all batches already have real hashes.
   if (hasProvisionalBatches()) {
     const repairedCount = await repairProvisionalBatches(async repPhotoId => {
       const photo = photos.find(p => stableId(p) === repPhotoId);
@@ -416,66 +440,170 @@ export async function assignPhotoBatchesPersisted(
 
   if (allOrphanIds.size === 0) {
     console.log(
-      `[BatchingService] Cache HIT for all ${photos.length} photos — skipping sequential batching algorithm.`,
+      `[BatchingService] Cache HIT for all ${photos.length} photos — skipping batching pipeline.`,
     );
   } else {
     console.log(
       `[BatchingService] Cache check: ${photos.length - allOrphanIds.size} already assigned in disk cache, ${allOrphanIds.size} orphan(s) need batching.`,
     );
-  }
 
-  // ANALYSIS-READY GATE: only batch photos whose pHash has been computed.
-  // Photos where analysis is still in-flight (pHash == null) are deferred —
-  // they remain orphans and will be picked up on the next useEffect run
-  // (triggered when their qualityResult.pHash arrives and enters the dep array).
-  const readyOrphans: GalleryPhotoItem[] = [];
-  const deferredOrphans: GalleryPhotoItem[] = [];
-  for (const p of photos) {
-    if (!allOrphanIds.has(stableId(p))) continue;
-    if (getPHash(p) != null) {
-      readyOrphans.push(p);
-    } else {
-      deferredOrphans.push(p);
+    const orphanPhotos = photos
+      .filter(p => allOrphanIds.has(stableId(p)))
+      .sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0));
+    const tStart = performance.now();
+
+    // Step 2: Extract visual features (dHash, color histogram, tiled Laplacian) in non-blocking chunks
+    const featuresMap = await extractFeaturesInChunks(
+      orphanPhotos.map(p => ({
+        id: stableId(p),
+        uri: p.uri,
+        existingPHash: p.pHash || p.qualityResult?.pHash,
+        existingSharpness: p.qualityResult?.sharpnessScore,
+      })),
+    );
+
+    // Eagerly hydrate pHash onto in-memory items
+    for (const p of orphanPhotos) {
+      const feat = featuresMap.get(stableId(p));
+      if (feat) {
+        p.pHash = feat.dHash;
+      }
     }
-  }
 
-  if (deferredOrphans.length > 0) {
+    const photosByStableId = new Map<string, GalleryPhotoItem>();
+    for (const p of photos) {
+      photosByStableId.set(stableId(p), p);
+    }
+
+    // Step 3: Check against the last open / persisted batch in local storage
+    let openBatch = await getLastOpenBatch();
+    let unassignedOrphans = [...orphanPhotos];
+    let appendedToSeedCount = 0;
+
+    if (
+      openBatch &&
+      openBatch.provisional !== true &&
+      (openBatch.lastPhotoHash || openBatch.representativeHash)
+    ) {
+      const orphansToAppend: GalleryPhotoItem[] = [];
+
+      for (let i = 0; i < unassignedOrphans.length; i++) {
+        const candidate = unassignedOrphans[i];
+        const candidateHash = featuresMap.get(stableId(candidate))?.dHash || candidate.pHash;
+        const compareHash = openBatch.lastPhotoHash || openBatch.representativeHash;
+
+        if (candidateHash && compareHash) {
+          const dist = computeDHashHammingDistance(candidateHash, compareHash);
+          const featA = featuresMap.get(stableId(candidate));
+          const colorDist = featA
+            ? computeColorHistogramDistance(featA.colorHistogram, featA.colorHistogram)
+            : 0;
+
+          if (dist <= DHASH_DISTANCE_THRESHOLD && colorDist <= COLOR_HISTOGRAM_TOLERANCE) {
+            // Match found! Append to existing open batch and update latest stored hash
+            const candId = stableId(candidate);
+            const candIso = toIso(extractPhotoTimestampMs(candidate, openBatch.photoIds.length));
+
+            orphansToAppend.push(candidate);
+            openBatch.photoIds.push(candId);
+            openBatch.endTime = candIso;
+            // Replace the latest hash with the new photo's hash in local storage
+            openBatch.lastPhotoHash = candidateHash;
+
+            // Recompute best shot across hydrated photos in the batch
+            const batchPhotos = openBatch.photoIds
+              .map((id: string) => photosByStableId.get(id))
+              .filter((p: GalleryPhotoItem | undefined): p is GalleryPhotoItem => p !== undefined);
+            const bestShot =
+              batchPhotos.length > 0 ? selectBestShotId(batchPhotos).bestShotId : candId;
+            openBatch.bestShotPhotoId = bestShot;
+
+            await appendPhotoToBatch(openBatch.id, candId, candIso, candidateHash, bestShot);
+            appendedToSeedCount++;
+            continue;
+          }
+        }
+        // If similarity check fails, the open batch boundary closes
+        break;
+      }
+
+      if (orphansToAppend.length > 0) {
+        const appendedSet = new Set(orphansToAppend.map(stableId));
+        unassignedOrphans = unassignedOrphans.filter(p => !appendedSet.has(stableId(p)));
+        console.log(
+          `[BatchingService] Appended ${orphansToAppend.length} photo(s) to existing batch ${openBatch.id} and updated latest stored hash.`,
+        );
+      }
+    }
+
+    // Step 4: Pure visual clustering for remaining orphan photos
+    const newBatches: PersistedBatch[] = [];
+
+    if (unassignedOrphans.length > 0) {
+      const clusters = clusterPhotosByVisualSimilarity(
+        unassignedOrphans.map(stableId),
+        featuresMap,
+        DHASH_DISTANCE_THRESHOLD,
+        COLOR_HISTOGRAM_TOLERANCE,
+      );
+
+      // Step 5: Pure-Skia best shot selection & batch construction for new clusters
+      for (const clusterPhotoIds of clusters) {
+        const clusterPhotos = clusterPhotoIds
+          .map(id => photosByStableId.get(id))
+          .filter((p): p is GalleryPhotoItem => p !== undefined)
+          .sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0));
+
+        if (clusterPhotos.length === 0) continue;
+
+        const { bestShotId } = await selectClusterBestShot(
+          clusterPhotoIds,
+          photosByStableId,
+          featuresMap,
+        );
+
+        const firstPhoto = clusterPhotos[0];
+        const lastPhoto = clusterPhotos[clusterPhotos.length - 1];
+        const repHash = featuresMap.get(stableId(firstPhoto))?.dHash || firstPhoto.pHash || null;
+        const lastHash = featuresMap.get(stableId(lastPhoto))?.dHash || lastPhoto.pHash || null;
+
+        newBatches.push({
+          id: `batch-${stableId(firstPhoto)}`,
+          photoIds: clusterPhotos.map(stableId),
+          startTime: toIso(extractPhotoTimestampMs(firstPhoto, 0)),
+          endTime: toIso(extractPhotoTimestampMs(lastPhoto, clusterPhotos.length - 1)),
+          representativeFaceCount: firstPhoto.qualityResult?.faceCount ?? null,
+          representativeHash: repHash,
+          lastPhotoHash: lastHash,
+          bestShotPhotoId: bestShotId || stableId(firstPhoto),
+          provisional: repHash == null,
+        });
+      }
+
+      // Step 6: Persist new batches to disk
+      if (newBatches.length > 0) {
+        await saveBatchResults(newBatches);
+      }
+    }
+
+    const duration = performance.now() - tStart;
+    const multiCount = newBatches.filter(b => b.photoIds.length > 1).length;
+    const singleCount = newBatches.length - multiCount;
+
     console.log(
-      `[BatchingService] Deferring ${deferredOrphans.length} photo(s) — pHash not yet computed: ` +
-        deferredOrphans.map(p => p.filename || p.id).join(', '),
+      `[BatchingService] Pure-Skia batching completed in ${duration.toFixed(0)}ms: ` +
+        `${orphanPhotos.length} photos (${appendedToSeedCount} joined previous batch, ${newBatches.length} new batches formed: ` +
+        `${multiCount} multi-photo clusters, ${singleCount} singletons).`,
     );
   }
 
-  // Step 2: get seed batch from previous session
-  const seedBatch = readyOrphans.length > 0 ? await getLastOpenBatch() : null;
-
-  // Step 3: run sequential algorithm (only on analysis-ready orphans)
-  const { newBatches, seedAppends } = runSequentialAlgorithm(readyOrphans, seedBatch);
-
-  // Step 4: persist
-  if (seedAppends.length > 0 && seedBatch) {
-    for (const { stablePhotoId, endTimeIso, lastPhotoHash } of seedAppends) {
-      await appendPhotoToBatch(seedBatch.id, stablePhotoId, endTimeIso, lastPhotoHash);
-    }
-  }
-  if (newBatches.length > 0) {
-    await saveBatchResults(newBatches);
-  }
-
-  // Step 5: rebuild the full assignment map from persisted state
-  // Re-load all persisted batches (now includes the new ones)
+  // Step 6: Return complete assignment map from all persisted batches
   const allBatches = await getAllPersistedBatches();
   const assignmentMap = new Map<string, string>();
   for (const batch of allBatches) {
     for (const pid of batch.photoIds) {
       assignmentMap.set(pid, batch.id);
     }
-  }
-
-  if (readyOrphans.length > 0) {
-    console.log(
-      `[BatchingService] Assigned ${readyOrphans.length} new photo(s) → ${newBatches.length} new batch(es), ${seedAppends.length} appended to seed.`,
-    );
   }
 
   return assignmentMap;
@@ -605,7 +733,7 @@ function formatBatchTimeString(startTimeIso: string, endTimeIso: string): string
  * Returns a human-readable title for a SectionList batch section header:
  * e.g. "10:00 AM – Batch 1 (2 photos)" or "10:00 AM – 10:03 AM · Batch 2 (4 photos)"
  */
-function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): string {
+export function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): string {
   const count = batch.photos.length;
   const photoWord = count === 1 ? 'photo' : 'photos';
   const timeStr = formatBatchTimeString(batch.startTime, batch.endTime);
@@ -624,7 +752,7 @@ function batchSectionTitle(batch: RuntimeBatch, batchIndex: number): string {
  * Face count has been removed from batch headers to eliminate clutter and reflect
  * pure visual similarity grouping (matching Google Photos / standard gallery apps).
  */
-function batchSectionSubtitle(_batch: RuntimeBatch): string | null {
+export function batchSectionSubtitle(_batch: RuntimeBatch): string | null {
   return null;
 }
 
@@ -679,15 +807,22 @@ export function buildGallerySections(
     }
   });
 
-  return batches.map((batch, idx) => {
-    const batchIndex = idx + 1;
-    const title = batchSectionTitle(batch, batchIndex);
-    const subtitle = batchSectionSubtitle(batch);
-    const isMultiPhoto = batch.photos.length >= MIN_BATCH_SIZE_FOR_LABEL;
+  const sections: GalleryBatchSection[] = [];
+  let batchCounter = 0;
+
+  for (const batch of batches) {
+    if (!batch.photos || batch.photos.length === 0) continue;
+
+    batchCounter++;
+    const batchIndex = batchCounter;
+    const title = `Batch ${batchIndex}`;
+    const timeStr =
+      formatBatchTimeString(batch.startTime, batch.endTime) || batch.photos[0]?.timestamp || '';
+    const subtitle = timeStr;
 
     // Identify best shot photo in this batch
     let bestShotPhoto: GalleryPhotoItem | null = null;
-    if (batch.photos.length > 0) {
+    if (batch.photos.length > 1) {
       if (batch.bestShotPhotoId) {
         bestShotPhoto =
           batch.photos.find(
@@ -705,7 +840,6 @@ export function buildGallerySections(
     const rows: GallerySectionRow[] = [];
     const bestId = bestShotPhoto?.filename || bestShotPhoto?.id;
 
-    // ── Render all photos in 3-column grid rows directly ──
     for (let i = 0; i < batch.photos.length; i += 3) {
       const slice = batch.photos.slice(i, i + 3);
       rows.push({
@@ -717,23 +851,25 @@ export function buildGallerySections(
             photoIndexMap.get(photo.id) ??
             (photo.filename ? photoIndexMap.get(photo.filename) : undefined) ??
             0,
-          isBestShot: isMultiPhoto && (photo.filename || photo.id) === bestId,
+          isBestShot: Boolean(bestId && (photo.filename || photo.id) === bestId),
         })),
       });
     }
 
-    return {
+    sections.push({
       batch,
       batchIndex,
       title,
       subtitle,
       key: `section-${batch.id}`,
       isCollapsed: false,
-      isMultiPhoto,
+      isMultiPhoto: batch.photos.length > 1,
       bestShotPhoto,
       data: rows,
-    };
-  });
+    });
+  }
+
+  return sections;
 }
 
 // Re-export core algorithm for simulation and unit testing

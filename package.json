@@ -7,7 +7,6 @@
     "@expo-google-fonts/plus-jakarta-sans": "^0.4.2",
     "@expo-google-fonts/syne": "^0.4.2",
     "@react-native-google-signin/google-signin": "^16.1.5",
-    "@react-native-ml-kit/face-detection": "^2.0.1",
     "@react-navigation/native": "^7.3.18",
     "@react-navigation/native-stack": "^7.18.10",
     "@shopify/react-native-skia": "2.6.2",
@@ -39,6 +38,8 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@emnapi/core": "^1.11.3",
+    "@emnapi/runtime": "^1.11.3",
     "@types/jest": "^30.0.0",
     "@types/react": "~19.2.2",
     "babel-plugin-module-resolver": "^5.0.3",
@@ -60,7 +61,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "typecheck": "tsc --noEmit",
-    "prepare": "husky"
+    "prepare": "node -e \"if (!process.env.CI && !process.env.EAS_BUILD) { try { require('child_process').execSync('husky', { stdio: 'inherit' }); } catch {} }\""
   },
   "private": true
 }

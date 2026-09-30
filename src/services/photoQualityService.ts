@@ -2,7 +2,6 @@ import { Image } from 'react-native';
 import * as Device from 'expo-device';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { File } from 'expo-file-system';
-import FaceDetection from '@react-native-ml-kit/face-detection';
 import {
   Skia,
   TileMode,
@@ -50,7 +49,7 @@ export interface PhotoQualityResult {
 
 // ── CALIBRATION CONSTANTS ──────────────────────────────────────────────────
 // Threshold for eye-open classification (0.0 = fully closed, 1.0 = fully open)
-const EYE_OPEN_THRESHOLD = 0.5;
+export const EYE_OPEN_THRESHOLD = 0.5;
 
 // Downscale target for analysis (longest edge in pixels)
 const TARGET_LONGEST_EDGE = 1280;
@@ -197,64 +196,23 @@ async function cleanupTempFile(fileUri: string): Promise<void> {
 }
 
 /**
- * Performs face and eye-open detection using ML Kit.
+ * Face and eye detection stub (ML Kit removed for instant 60fps performance and zero OOM memory spikes).
+ * Returns instant neutral result with 0ms overhead.
  */
-async function detectFacesAndEyes(imageUri: string): Promise<{
+export async function detectFacesAndEyes(_imageUri: string): Promise<{
   hasFace: boolean;
   faceCount: number;
   closedEyeCount: number;
   eyesOpen: boolean;
   _t_face: number;
 }> {
-  const t_start = performance.now();
-  try {
-    const faces = await FaceDetection.detect(imageUri, {
-      performanceMode: 'fast',
-      classificationMode: 'all',
-      landmarkMode: 'none',
-      contourMode: 'none',
-    });
-
-    const faceCount = faces.length;
-    const hasFace = faceCount > 0;
-
-    let closedEyeCount = 0;
-
-    for (const face of faces) {
-      const leftEye = face.leftEyeOpenProbability;
-      const rightEye = face.rightEyeOpenProbability;
-
-      // If either eye probability is provided and below threshold, count as closed
-      const isLeftClosed = typeof leftEye === 'number' && leftEye < EYE_OPEN_THRESHOLD;
-      const isRightClosed = typeof rightEye === 'number' && rightEye < EYE_OPEN_THRESHOLD;
-
-      if (isLeftClosed || isRightClosed) {
-        closedEyeCount++;
-      }
-    }
-
-    // Top-level eyesOpen boolean: true if no closed eyes detected among any detected faces
-    const eyesOpen = closedEyeCount === 0;
-    const _t_face = performance.now() - t_start;
-
-    return {
-      hasFace,
-      faceCount,
-      closedEyeCount,
-      eyesOpen,
-      _t_face,
-    };
-  } catch (error) {
-    const _t_face = performance.now() - t_start;
-    console.warn('[PhotoQualityService] ML Kit face detection failed or not linked:', error);
-    return {
-      hasFace: false,
-      faceCount: 0,
-      closedEyeCount: 0,
-      eyesOpen: true,
-      _t_face,
-    };
-  }
+  return {
+    hasFace: false,
+    faceCount: 0,
+    closedEyeCount: 0,
+    eyesOpen: true,
+    _t_face: 0,
+  };
 }
 
 /**
@@ -585,28 +543,16 @@ async function runSinglePhotoAnalysis(
     tempResizedUri = await resizeForAnalysis(photoUri);
     const t_resize = performance.now() - t_resize_start;
 
-    // Step 2: Run Skia analysis and Face Detection (ML Kit) in PARALLEL.
-    // Decoupled batching: Skia computes pHash in ~1-15ms, notifying onHashReady immediately
-    // so batching can form the visual batch without waiting for ML Kit face detection (~100-140ms).
-    const t_face_start = performance.now();
-
-    const skiaPromise = analyzeBlurAndExposureWithSkia(tempResizedUri).then(skiaRes => {
-      if (skiaRes.pHash && onHashReady) {
-        try {
-          onHashReady(skiaRes.pHash);
-        } catch (cbErr) {
-          console.warn('[PhotoQualityService] Error in onHashReady callback:', cbErr);
-        }
+    // Step 2: Run pure Skia blur, exposure, and perceptual hash analysis (~25ms, zero ML Kit overhead)
+    const skiaAnalysis = await analyzeBlurAndExposureWithSkia(tempResizedUri);
+    if (skiaAnalysis.pHash && onHashReady) {
+      try {
+        onHashReady(skiaAnalysis.pHash);
+      } catch (cbErr) {
+        console.warn('[PhotoQualityService] Error in onHashReady callback:', cbErr);
       }
-      return skiaRes;
-    });
+    }
 
-    const facePromise = detectFacesAndEyes(tempResizedUri);
-
-    const [skiaAnalysis, faceAnalysis] = await Promise.all([skiaPromise, facePromise]);
-
-    // Note: face and skia run in parallel, so we measure them from shared start
-    const t_face = performance.now() - t_face_start; // wall time (dominated by the longer of the two)
     const t_total = performance.now() - T_total_start;
 
     // ── Per-stage log ──────────────────────────────────────────────────────
@@ -615,11 +561,9 @@ async function runSinglePhotoAnalysis(
         `  resize (manipulateAsync):         ${t_resize.toFixed(0)}ms\n` +
         `  skia.decode (Skia.Data.fromURI):  ${skiaAnalysis._t_decode.toFixed(0)}ms\n` +
         `  small surface 256×H (shared):     ${skiaAnalysis._t_small.toFixed(0)}ms\n` +
-        `  exposureAnalysis (readPixels):    ${skiaAnalysis._t_exposure.toFixed(0)}ms  [was ~200-400ms at 1280×960]\n` +
-        `  blurAnalysis (Laplacian 256×H):   ${skiaAnalysis._t_blur.toFixed(0)}ms  [was ~200-600ms at 1280×960]\n` +
+        `  exposureAnalysis (readPixels):    ${skiaAnalysis._t_exposure.toFixed(0)}ms\n` +
+        `  blurAnalysis (Laplacian 256×H):   ${skiaAnalysis._t_blur.toFixed(0)}ms\n` +
         `  perceptualHash (9×8 from small):  ${skiaAnalysis._t_pHash.toFixed(0)}ms\n` +
-        `  faceDetection (ML Kit, parallel): (parallel with Skia)\n` +
-        `  [ML Kit + Skia wall time]:        ${t_face.toFixed(0)}ms\n` +
         `  TOTAL:                            ${t_total.toFixed(0)}ms`,
     );
 
@@ -637,37 +581,20 @@ async function runSinglePhotoAnalysis(
       _perfAccum.worstName = name;
     }
 
-    // Print running average every 10 photos
-    if (_perfAccum.photoCount % 10 === 0) {
-      const n = _perfAccum.photoCount;
-      console.log(
-        `[Perf] ── Running average after ${n} photos (OPTIMIZED build) ──\n` +
-          `  avg resize:         ${(_perfAccum.t_resize / n).toFixed(0)}ms\n` +
-          `  avg skia.decode:    ${(_perfAccum.t_decode / n).toFixed(0)}ms\n` +
-          `  avg small surface:  ${(_perfAccum.t_small / n).toFixed(0)}ms  (256×H shared downsample)\n` +
-          `  avg exposure:       ${(_perfAccum.t_exposure / n).toFixed(0)}ms  (readPixels 256×H, ~200KB)\n` +
-          `  avg blur:           ${(_perfAccum.t_blur / n).toFixed(0)}ms  (Laplacian 256×H)\n` +
-          `  avg pHash:          ${(_perfAccum.t_pHash / n).toFixed(0)}ms\n` +
-          `  avg TOTAL:          ${(_perfAccum.t_total / n).toFixed(0)}ms\n` +
-          `  worst photo:        ${_perfAccum.worstName} (${_perfAccum.worstTotal.toFixed(0)}ms)\n` +
-          `  active workers:     ${activeWorkers}/${getMaxConcurrentAnalyses()}  (adaptive limit)`,
-      );
-    }
-
     return {
       blur: skiaAnalysis.isBlur,
-      face: faceAnalysis.hasFace,
+      face: false,
       overExposure: skiaAnalysis.isOverExposed,
-      eyesOpen: faceAnalysis.eyesOpen,
-      faceCount: faceAnalysis.faceCount,
-      closedEyeCount: faceAnalysis.closedEyeCount,
+      eyesOpen: true,
+      faceCount: 0,
+      closedEyeCount: 0,
       sharpnessScore: skiaAnalysis.sharpnessScore,
       exposureScore: skiaAnalysis.exposureScore,
       pHash: skiaAnalysis.pHash,
       confidence: 1.0,
       _perf: {
         t_resize,
-        t_face: faceAnalysis._t_face,
+        t_face: 0,
         t_decode: skiaAnalysis._t_decode,
         t_small: skiaAnalysis._t_small,
         t_blur: skiaAnalysis._t_blur,

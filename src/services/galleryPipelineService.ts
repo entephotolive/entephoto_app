@@ -122,10 +122,9 @@ export function stopGalleryPipeline(): void {
 function isPhotoQualityPassing(result: PhotoQualityResult): boolean {
   const isBlurry = result.blur;
   const isOverExposed = result.overExposure;
-  const hasClosedEyes = result.face && !result.eyesOpen;
 
-  // Pass if not blurry, not overexposed, and no closed eyes on detected faces
-  return !isBlurry && !isOverExposed && !hasClosedEyes;
+  // Pass if not blurry and not overexposed
+  return !isBlurry && !isOverExposed;
 }
 
 export interface PipelineCallbacks {
@@ -251,7 +250,6 @@ async function processSinglePhoto(
     console.log(
       `[Perf] ${currentPhoto.filename || currentPhoto.id}:\n` +
         `  decode+resize (analysis copy): ${(p?.t_resize ?? 0).toFixed(0)}ms\n` +
-        `  faceDetection (ML Kit):         ${(p?.t_face ?? 0).toFixed(0)}ms\n` +
         `  blurAnalysis (Skia):            ${(p?.t_blur ?? 0).toFixed(0)}ms\n` +
         `  exposureAnalysis (Skia):        ${(p?.t_exposure ?? 0).toFixed(0)}ms\n` +
         `  perceptualHash (Skia):          ${(p?.t_pHash ?? 0).toFixed(0)}ms\n` +

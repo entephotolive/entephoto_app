@@ -2,6 +2,7 @@
 
 export const ENV = {
   API_BASE_URL: process.env.EXPO_PUBLIC_API_URL || 'https://staging.entephoto.co.in/api',
+  REDIRECT_URL: process.env.EXPO_PUBLIC_REDIRECT_URL || 'https://staging.entephoto.co.in',
   GOOGLE_WEB_CLIENT_ID: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
   TIMEOUT_MS: 15000,
 };
