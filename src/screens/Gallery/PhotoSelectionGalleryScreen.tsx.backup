@@ -98,7 +98,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     filename?: string;
   } | null>(null);
   const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
-  const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
 
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
@@ -158,7 +157,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const totalCount = photos.length;
 
   const selectedCount = useMemo(() => {
-    return selectedPhotoIds.size;
+    return photos.filter(p => p.selected).length;
   }, [photos]);
 
   const newCount = useMemo(() => {
@@ -166,7 +165,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   }, [photos]);
 
   const markedCount = useMemo(() => {
-    return photos.filter(p => p.status === 'marked' || selectedPhotoIds.has(p.id)).length;
+    return photos.filter(p => p.status === 'marked' || p.selected).length;
   }, [photos]);
 
   const uploadedCount = useMemo(() => {
@@ -179,14 +178,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       case 'New':
         return photos.filter(p => p.status === 'new');
       case 'Marked':
-        return photos.filter(p => selectedPhotoIds.has(p.id) || p.status === 'marked');
+        return photos.filter(p => p.selected || p.status === 'marked');
       case 'Uploaded':
         return photos.filter(p => p.status === 'uploaded');
       case 'All':
       default:
         return photos;
     }
-  }, [photos, activeFilter, selectedPhotoIds]);
+  }, [photos, activeFilter]);
 
   /**
    * Gallery batches — computed from date-based photo batching.
@@ -416,9 +415,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
-    const selectedPhotos = photos.filter(
-      p => selectedPhotoIds.has(p.id) && p.status !== 'uploaded',
-    );
+    const selectedPhotos = photos.filter(p => p.selected && p.status !== 'uploaded');
     if (selectedPhotos.length === 0) {
       Alert.alert(
         'No Photos Selected',
@@ -571,12 +568,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <MemoizedBatchHeader
           section={section}
           isDark={isDark}
-          selectedPhotoIds={selectedPhotoIds}
           onToggleBatchSelection={toggleBatchSelection}
         />
       );
     },
-    [isDark, selectedPhotoIds, toggleBatchSelection],
+    [isDark, toggleBatchSelection],
   );
 
   // ── Render: Section Item (3-Column Grid Row for all batch photos) ──────────
@@ -588,7 +584,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <MemoizedGridRow
           item={item}
           uploadingPhotoIds={uploadingPhotoIds}
-          selectedPhotoIds={selectedPhotoIds}
           onOpenViewer={flatIndex => {
             setViewerInitialIndex(flatIndex);
             setViewerVisible(true);
@@ -597,7 +592,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         />
       );
     },
-    [uploadingPhotoIds, selectedPhotoIds, togglePhotoSelection],
+    [uploadingPhotoIds, togglePhotoSelection],
   );
 
   return (
@@ -739,7 +734,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         {/* ── 3. PHOTO GRID (SectionList, one section per PhotoBatch) ── */}
         <SectionList<GallerySectionRow, GalleryBatchSection>
           sections={gallerySections}
-          extraData={selectedPhotoIds}
           keyExtractor={item => item.rowKey}
           renderItem={renderSectionItem}
           renderSectionHeader={renderSectionHeader}
@@ -936,18 +930,16 @@ const MemoizedPhotoTile = React.memo(
     item,
     flatIndex,
     isUploading,
-    isSelected,
     onOpenViewer,
     onToggleSelection,
   }: {
     item: GalleryPhotoItem;
     flatIndex: number;
     isUploading: boolean;
-    isSelected: boolean;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
-    // isSelected comes from props
+    const isSelected = item.selected;
     const isUploaded = item.status === 'uploaded';
 
     return (
@@ -1018,7 +1010,6 @@ const MemoizedPhotoTile = React.memo(
     return (
       prevProps.item === nextProps.item &&
       prevProps.isUploading === nextProps.isUploading &&
-      prevProps.isSelected === nextProps.isSelected &&
       prevProps.flatIndex === nextProps.flatIndex
     );
   },
@@ -1028,13 +1019,11 @@ const MemoizedGridRow = React.memo(
   ({
     item,
     uploadingPhotoIds,
-    selectedPhotoIds,
     onOpenViewer,
     onToggleSelection,
   }: {
     item: Extract<GallerySectionRow, { type: 'grid_row' }>;
     uploadingPhotoIds: Set<string>;
-    selectedPhotoIds: Set<string>;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
@@ -1046,7 +1035,6 @@ const MemoizedGridRow = React.memo(
             item={photo}
             flatIndex={photoIndex}
             isUploading={uploadingPhotoIds.has(photo.id)}
-            isSelected={selectedPhotoIds.has(photo.id)}
             onOpenViewer={onOpenViewer}
             onToggleSelection={onToggleSelection}
           />
@@ -1071,9 +1059,6 @@ const MemoizedGridRow = React.memo(
       const wasUploading = prev.uploadingPhotoIds.has(photo.id);
       const isUploading = next.uploadingPhotoIds.has(photo.id);
       if (wasUploading !== isUploading) return false;
-      const wasSelected = prev.selectedPhotoIds.has(photo.id);
-      const isSelected = next.selectedPhotoIds.has(photo.id);
-      if (wasSelected !== isSelected) return false;
     }
 
     return true;
@@ -1084,18 +1069,16 @@ const MemoizedBatchHeader = React.memo(
   ({
     section,
     isDark,
-    selectedPhotoIds,
     onToggleBatchSelection,
   }: {
     section: GalleryBatchSection;
     isDark: boolean;
-    selectedPhotoIds: Set<string>;
     onToggleBatchSelection: (batch: RuntimeBatch) => void;
   }) => {
     const { title, batch } = section;
     const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
     const isAllBatchSelected =
-      selectablePhotos.length > 0 && selectablePhotos.every(p => selectedPhotoIds.has(p.id));
+      selectablePhotos.length > 0 && selectablePhotos.every(p => p.selected);
 
     return (
       <View
@@ -1171,10 +1154,7 @@ const MemoizedBatchHeader = React.memo(
 
     if (prev.section.batch.photos.length !== next.section.batch.photos.length) return false;
     for (let i = 0; i < prev.section.batch.photos.length; i++) {
-      if (
-        prev.selectedPhotoIds.has(prev.section.batch.photos[i].id) !==
-        next.selectedPhotoIds.has(next.section.batch.photos[i].id)
-      )
+      if (prev.section.batch.photos[i].selected !== next.section.batch.photos[i].selected)
         return false;
       if (prev.section.batch.photos[i].status !== next.section.batch.photos[i].status) return false;
     }
