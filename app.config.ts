@@ -20,6 +20,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     plugins: [
       ...(Array.isArray(config.plugins) ? config.plugins : []),
       '@react-native-google-signin/google-signin',
+      'expo-image',
     ],
   };
 };

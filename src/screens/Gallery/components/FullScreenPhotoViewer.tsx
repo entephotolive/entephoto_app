@@ -54,8 +54,6 @@ import {
   Trash2,
   CloudUpload,
   CheckCircle2,
-  AlertTriangle,
-  Check,
 } from 'lucide-react-native';
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
@@ -80,7 +78,6 @@ export interface FullScreenPhotoViewerProps {
   onToggleMark: (id: string) => void;
   onUploadPhoto: (photo: GalleryPhotoItem) => void;
   onDeletePhoto: (photo: GalleryPhotoItem) => void;
-  onOpenQualityDetail?: (photo: GalleryPhotoItem) => void;
   isDark?: boolean;
 }
 
@@ -95,7 +92,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   onToggleMark,
   onUploadPhoto,
   onDeletePhoto,
-  onOpenQualityDetail,
 }) => {
   const insets = useSafeAreaInsets();
 
@@ -459,44 +455,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           </View>
 
           <View style={styles.headerRight}>
-            {currentPhoto.qualityResult ? (
-              <TouchableOpacity
-                onPress={() => onOpenQualityDetail?.(currentPhoto)}
-                hitSlop={6}
-                style={[
-                  styles.headerQualityPill,
-                  {
-                    backgroundColor:
-                      currentPhoto.qualityResult.blur ||
-                      currentPhoto.qualityResult.overExposure ||
-                      (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen)
-                        ? '#FEF3C7'
-                        : '#D1FAE5',
-                    borderColor:
-                      currentPhoto.qualityResult.blur ||
-                      currentPhoto.qualityResult.overExposure ||
-                      (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen)
-                        ? '#D97706'
-                        : '#059669',
-                  },
-                ]}
-              >
-                {currentPhoto.qualityResult.blur ||
-                currentPhoto.qualityResult.overExposure ||
-                (currentPhoto.qualityResult.face && !currentPhoto.qualityResult.eyesOpen) ? (
-                  <>
-                    <AlertTriangle size={12} color="#92400E" strokeWidth={2.6} />
-                    <Text style={styles.headerQualityTextReview}>Review</Text>
-                  </>
-                ) : (
-                  <>
-                    <Check size={12} color="#065F46" strokeWidth={3} />
-                    <Text style={styles.headerQualityTextPass}>Sharp</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            ) : null}
-
             <Text style={styles.counterText}>
               {currentIndex + 1} / {photos.length}
             </Text>

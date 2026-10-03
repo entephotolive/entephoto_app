@@ -101,7 +101,10 @@ const HomeScreen: React.FC = () => {
 
 export const AppNavigator: React.FC = () => {
   return (
-    <Stack.Navigator initialRouteName="SelectEvent" screenOptions={{ headerShown: false }}>
+    <Stack.Navigator
+      initialRouteName="PhotoSelectionGallery"
+      screenOptions={{ headerShown: false }}
+    >
       <Stack.Screen name="SelectEvent" component={SelectEventScreen} />
       <Stack.Screen name="CameraConnect" component={CameraConnectScreen} />
       <Stack.Screen name="CameraConnected" component={CameraConnectedScreen} />
