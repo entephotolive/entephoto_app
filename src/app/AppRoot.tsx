@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, StyleSheet } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -15,8 +15,9 @@ import {
   JetBrainsMono_600SemiBold,
   JetBrainsMono_700Bold,
 } from '@expo-google-fonts/jetbrains-mono';
-import { ThemeProvider } from '@/constants/theme';
+import { ThemeProvider, ThemeMode } from '@/constants/theme';
 import { RootNavigator } from '@/navigation/RootNavigator';
+import { storageService } from '@/services/storageService';
 
 // Keep splash screen visible while resources load
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -43,13 +44,36 @@ export const AppRoot: React.FC = () => {
     JetBrainsMono_700Bold,
   });
 
+  const [initialTheme, setInitialTheme] = useState<ThemeMode | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    storageService
+      .getThemePreference()
+      .then(saved => {
+        if (isMounted) {
+          setInitialTheme(saved ?? 'light');
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setInitialTheme('light');
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const isReady = (fontsLoaded || fontError) && initialTheme !== null;
+
   const onLayoutRootView = useCallback(async () => {
-    if (fontsLoaded || fontError) {
+    if (isReady) {
       await SplashScreen.hideAsync().catch(() => {});
     }
-  }, [fontsLoaded, fontError]);
+  }, [isReady]);
 
-  if (!fontsLoaded && !fontError) {
+  if (!isReady) {
     return null;
   }
 
@@ -57,7 +81,7 @@ export const AppRoot: React.FC = () => {
     <View style={styles.container} onLayout={onLayoutRootView}>
       <QueryClientProvider client={queryClient}>
         <SafeAreaProvider>
-          <ThemeProvider initialMode="dark">
+          <ThemeProvider initialMode={initialTheme}>
             <RootNavigator />
           </ThemeProvider>
         </SafeAreaProvider>

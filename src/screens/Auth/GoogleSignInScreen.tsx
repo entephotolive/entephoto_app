@@ -12,17 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Polygon } from 'react-native-svg';
-import {
-  Shield,
-  Zap,
-  Heart,
-  ArrowRight,
-  Sun,
-  Moon,
-  AlertTriangle,
-  RotateCw,
-  X,
-} from 'lucide-react-native';
+import { Shield, Zap, Heart, ArrowRight, AlertTriangle, RotateCw, X } from 'lucide-react-native';
 
 import { useAuthSession } from './hooks/useAuthSession';
 import { Text } from '@/components/Text';
@@ -63,7 +53,7 @@ const SparkleStar: React.FC<{ size?: number; color?: string }> = ({
 );
 
 export const GoogleSignInScreen: React.FC = () => {
-  const { colors, isDark, toggleTheme } = useTheme();
+  const { colors, isDark } = useTheme();
   const { signIn, isLoading, error, debugInfo, clearError, canRetry } = useAuthSession();
 
   const [pressScale] = useState(new Animated.Value(1));
@@ -302,30 +292,6 @@ export const GoogleSignInScreen: React.FC = () => {
                   </View>
                 </TouchableOpacity>
               </Animated.View>
-
-              {/* Theme Toggle Button */}
-              <TouchableOpacity
-                onPress={toggleTheme}
-                activeOpacity={0.75}
-                accessibilityRole="button"
-                accessibilityLabel={`Switch to ${isDark ? 'light' : 'dark'} theme`}
-                style={[
-                  styles.themeToggleButton,
-                  {
-                    backgroundColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.05)',
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                {isDark ? (
-                  <Sun size={15} color="#FBBF24" strokeWidth={2.2} />
-                ) : (
-                  <Moon size={15} color={colors.primary} strokeWidth={2.2} />
-                )}
-                <Text style={[styles.themeToggleText, { color: colors.textSecondary }]}>
-                  {isDark ? 'Switch to Light Theme' : 'Switch to Dark Theme'}
-                </Text>
-              </TouchableOpacity>
             </View>
           </View>
 
@@ -696,23 +662,6 @@ const styles = StyleSheet.create({
     width: 32,
     alignItems: 'center',
     justifyContent: 'flex-end',
-  },
-  themeToggleButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    marginTop: 14,
-    paddingVertical: 7,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    borderWidth: 1,
-    alignSelf: 'center',
-  },
-  themeToggleText: {
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: -0.2,
   },
 
   // Trust Badges

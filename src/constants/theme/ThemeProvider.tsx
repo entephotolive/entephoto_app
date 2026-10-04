@@ -1,12 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ThemeProvider.tsx — React context for the app theme
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { createContext, useContext, useMemo, useState, useCallback, ReactNode } from 'react';
-import { useColorScheme, StatusBar } from 'react-native';
+import React, {
+  createContext,
+  useContext,
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  ReactNode,
+} from 'react';
+import { StatusBar } from 'react-native';
 import { lightColors, darkColors, ThemeColors } from './colors';
 import { TYPOGRAPHY, FONTS } from './typography';
 import { SPACING, RADII } from './spacing';
 import { SHADOWS } from './shadows';
+import { storageService } from '@/services/storageService';
 
 export type ThemeMode = 'system' | 'dark' | 'light';
 
@@ -42,24 +51,47 @@ export interface ThemeProviderProps {
 
 export const ThemeProvider: React.FC<ThemeProviderProps> = ({
   children,
-  initialMode = 'system',
+  initialMode = 'light',
 }) => {
-  const systemColorScheme = useColorScheme();
-  const [mode, setMode] = useState<ThemeMode>(initialMode);
+  const [mode, setModeState] = useState<ThemeMode>(initialMode);
 
-  const isDark = useMemo(() => {
-    if (mode === 'system') {
-      return systemColorScheme !== 'light'; // defaults to dark
-    }
-    return mode === 'dark';
-  }, [mode, systemColorScheme]);
+  // Restore saved theme preference on mount if available
+  useEffect(() => {
+    let isMounted = true;
+    storageService
+      .getThemePreference()
+      .then(saved => {
+        if (isMounted && (saved === 'light' || saved === 'dark')) {
+          setModeState(saved);
+        }
+      })
+      .catch(error => {
+        console.error('[ThemeProvider] Failed to restore theme preference:', error);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const isDark = mode === 'dark';
+
+  const setMode = useCallback((newMode: ThemeMode) => {
+    setModeState(newMode);
+    const toSave = newMode === 'dark' ? 'dark' : 'light';
+    storageService.setThemePreference(toSave).catch(error => {
+      console.error('[ThemeProvider] Failed to persist theme preference:', error);
+    });
+  }, []);
 
   const toggleTheme = useCallback(() => {
-    setMode(prev => {
-      if (prev === 'system') return isDark ? 'light' : 'dark';
-      return prev === 'dark' ? 'light' : 'dark';
+    setModeState(prev => {
+      const nextMode = prev === 'dark' ? 'light' : 'dark';
+      storageService.setThemePreference(nextMode).catch(error => {
+        console.error('[ThemeProvider] Failed to persist theme preference:', error);
+      });
+      return nextMode;
     });
-  }, [isDark]);
+  }, []);
 
   const theme: Theme = useMemo(
     () => ({
@@ -75,7 +107,7 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({
       setMode,
       toggleTheme,
     }),
-    [isDark, mode, toggleTheme],
+    [isDark, mode, setMode, toggleTheme],
   );
 
   return (

@@ -4,6 +4,7 @@ const TOKEN_KEY = 'entephoto_session_token';
 const REFRESH_TOKEN_KEY = 'entephoto_refresh_token';
 const USER_KEY = 'entephoto_user_data';
 const FAVORITES_KEY = 'entephoto_favorite_photo_ids_v1';
+const THEME_KEY = 'entephoto_theme_preference_v1';
 
 export const storageService = {
   async getSessionToken(): Promise<string | null> {
@@ -122,6 +123,27 @@ export const storageService = {
       await SecureStore.setItemAsync(FAVORITES_KEY, JSON.stringify(ids));
     } catch (error) {
       console.error('[storageService] Failed to save favorite photo IDs:', error);
+    }
+  },
+
+  async getThemePreference(): Promise<'light' | 'dark' | null> {
+    try {
+      const data = await SecureStore.getItemAsync(THEME_KEY);
+      if (data === 'light' || data === 'dark') {
+        return data;
+      }
+      return null;
+    } catch (error) {
+      console.error('[storageService] Failed to get theme preference from SecureStore:', error);
+      return null;
+    }
+  },
+
+  async setThemePreference(theme: 'light' | 'dark'): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(THEME_KEY, theme);
+    } catch (error) {
+      console.error('[storageService] Failed to save theme preference to SecureStore:', error);
     }
   },
 };
