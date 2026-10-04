@@ -213,43 +213,27 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   }, [photos]);
 
   const markedCount = useMemo(() => {
-    let count = 0;
-    for (let i = 0; i < photos.length; i++) {
-      const p = photos[i];
-      if (selectedPhotoIds.has(p.id) || favoritePhotoIds.has(p.id) || p.status === 'marked') {
-        count++;
-      }
-    }
-    return count;
-  }, [photos, selectedPhotoIds, favoritePhotoIds]);
+    return photos.filter(p => p.status === 'marked').length;
+  }, [photos]);
 
   const uploadedCount = useMemo(() => {
     return photos.filter(p => p.status === 'uploaded').length;
   }, [photos]);
 
   // Filtered Photo List (Only recompute on selection/favorite changes when activeFilter is 'Marked' or 'Favorites')
-  const isMarkedTab = activeFilter === 'Marked';
-  const isFavoritesTab = activeFilter === 'Favorites';
   const filteredPhotos = useMemo(() => {
     switch (activeFilter) {
       case 'Favorites':
         return photos.filter(p => favoritePhotoIds.has(p.id));
       case 'Marked':
-        return photos.filter(
-          p => selectedPhotoIds.has(p.id) || favoritePhotoIds.has(p.id) || p.status === 'marked',
-        );
+        return photos.filter(p => p.status === 'marked');
       case 'Uploaded':
         return photos.filter(p => p.status === 'uploaded');
       case 'All':
       default:
         return photos;
     }
-  }, [
-    photos,
-    activeFilter,
-    isMarkedTab ? selectedPhotoIds : null,
-    isMarkedTab || isFavoritesTab ? favoritePhotoIds : null,
-  ]);
+  }, [photos, activeFilter, favoritePhotoIds]);
 
   /**
    * Gallery batches — computed from date-based photo batching.
