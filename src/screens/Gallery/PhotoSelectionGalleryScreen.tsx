@@ -92,6 +92,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
 
   // Uploading state
@@ -148,7 +149,25 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
+    let isMounted = true;
+
+    // Run initial scan to guarantee initial loading lifecycle finishes even if folder is empty
+    scanDcimEntephotoPhotos()
+      .then(scanned => {
+        if (!isMounted) return;
+        setPhotos(scanned);
+        setIsInitialLoading(false);
+      })
+      .catch(err => {
+        console.error('[Gallery] Initial scan failed:', err);
+        if (isMounted) {
+          setIsInitialLoading(false);
+        }
+      });
+
     const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
+      if (!isMounted) return;
+      setIsInitialLoading(false);
       setPhotos(prevPhotos => {
         if (prevPhotos.length === 0) {
           return dcimPhotos;
@@ -185,6 +204,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }, 2000);
 
     return () => {
+      isMounted = false;
       unsubscribe();
     };
   }, []);
@@ -728,7 +748,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         {/* ── 1. HEADER ROW ── */}
         <View style={styles.headerRow}>
-          {/* Circular Tactile Back Button */}
+          {/* Tactile Back Button (Matching App Header Style) */}
           <TouchableOpacity
             activeOpacity={0.75}
             onPress={handleBack}
@@ -736,8 +756,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             style={[
               styles.backButton,
               {
-                backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                borderColor: isDark ? '#2E2E36' : '#161616',
+                backgroundColor: isDark ? '#1A1A1E' : 'rgba(234, 223, 212, 0.7)',
+                borderColor: isDark ? '#2E2E36' : '#DFCFC2',
               },
             ]}
             accessibilityRole="button"
@@ -772,7 +792,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               <Text style={styles.connectedPillLabel}>Connected</Text>
             </View>
 
-            {/* Circular More Options Button */}
+            {/* More Options Button */}
             <TouchableOpacity
               activeOpacity={0.75}
               onPress={handleMoreOptions}
@@ -780,8 +800,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               style={[
                 styles.moreOptionsButton,
                 {
-                  backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                  borderColor: isDark ? '#2E2E36' : '#161616',
+                  backgroundColor: isDark ? '#1A1A1E' : 'rgba(234, 223, 212, 0.7)',
+                  borderColor: isDark ? '#2E2E36' : '#DFCFC2',
                 },
               ]}
               accessibilityRole="button"
@@ -859,12 +879,19 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           />
         </View>
 
+        {/* ── TOP LOADING SPINNER (Visible during initial photo scanning) ── */}
+        {isInitialLoading && (
+          <View style={styles.topSpinnerContainer}>
+            <ActivityIndicator size="small" color={isDark ? '#818CF8' : '#6366F1'} />
+          </View>
+        )}
+
         {/* ── 3. PHOTO GRID (SectionList, one section per PhotoBatch) ── */}
         <SectionList<GallerySectionRow, GalleryBatchSection>
           sections={gallerySections}
           extraData={useMemo(
-            () => [selectedPhotoIds, favoritePhotoIds],
-            [selectedPhotoIds, favoritePhotoIds],
+            () => [selectedPhotoIds, favoritePhotoIds, isInitialLoading],
+            [selectedPhotoIds, favoritePhotoIds, isInitialLoading],
           )}
           keyExtractor={item => item.rowKey}
           renderItem={renderSectionItem}
@@ -881,6 +908,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           scrollEnabled={gallerySections.length > 0}
           stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => {
+            if (isInitialLoading) {
+              return null;
+            }
+
             if (activeFilter === 'Favorites') {
               return (
                 <View style={styles.emptyContainer}>
@@ -1551,21 +1582,10 @@ const styles = StyleSheet.create({
   backButton: {
     width: 44,
     height: 44,
-    borderRadius: 22,
-    borderWidth: 2,
+    borderRadius: 16,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#161616',
-        shadowOffset: { width: 2, height: 2 },
-        shadowOpacity: 0.8,
-        shadowRadius: 0,
-      },
-      android: {
-        elevation: 3,
-      },
-    }),
   },
   headerTitleBlock: {
     flex: 1,
@@ -1613,21 +1633,10 @@ const styles = StyleSheet.create({
   moreOptionsButton: {
     width: 38,
     height: 38,
-    borderRadius: 19,
-    borderWidth: 2,
+    borderRadius: 14,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#161616',
-        shadowOffset: { width: 1.5, height: 1.5 },
-        shadowOpacity: 0.8,
-        shadowRadius: 0,
-      },
-      android: {
-        elevation: 2,
-      },
-    }),
   },
 
   // ── 2. Filter Row Styles ──
@@ -1681,6 +1690,11 @@ const styles = StyleSheet.create({
   filterChipDefaultText: {},
   filterChipSelectedText: {
     color: '#FFFFFF',
+  },
+  topSpinnerContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
   },
 
   // ── 3. Photo Grid Styles ──

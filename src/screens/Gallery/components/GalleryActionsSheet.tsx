@@ -8,10 +8,19 @@ import {
   ScrollView,
   Platform,
   Animated,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
-import { RefreshCw, CheckCheck, RotateCcw, Trash2, CloudUpload, Layers } from 'lucide-react-native';
+import {
+  RefreshCw,
+  CheckCheck,
+  RotateCcw,
+  Trash2,
+  CloudUpload,
+  Layers,
+  ArrowRight,
+} from 'lucide-react-native';
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
 
@@ -57,6 +66,31 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
   onDeleteSelected,
 }) => {
   const insets = useSafeAreaInsets();
+  const isAllUploadEnabled = newCount > 0;
+
+  const handleAllUploadPress = () => {
+    if (!isAllUploadEnabled) return;
+
+    Alert.alert(
+      'Start All Upload?',
+      'All photos in this gallery that have not been uploaded will be uploaded one by one.\n\nNewly arriving photos will also be included while All Upload is active.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Start Upload',
+          style: 'default',
+          onPress: () => {
+            // Foundation step: Confirmation acknowledged.
+            // Upload queue / background processing will be wired in future steps.
+          },
+        },
+      ],
+      { cancelable: true },
+    );
+  };
 
   // Animation values for sheet slide-up and staggered tile bounce
   const sheetAnim = useMemo(() => new Animated.Value(0), []);
@@ -287,21 +321,30 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
             <View style={styles.actionGridContainer}>{allTiles.map(renderGridCard)}</View>
           </ScrollView>
 
-          {/* Dismiss / Close Pill Button */}
+          {/* Primary All Upload Action Button */}
           <TouchableOpacity
             activeOpacity={0.8}
-            onPress={onClose}
+            onPress={handleAllUploadPress}
+            disabled={!isAllUploadEnabled}
             style={[
-              styles.dismissButton,
+              styles.allUploadButton,
               {
                 backgroundColor: isDark ? '#191922' : '#FFFFFF',
-                borderColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.04)',
+                borderColor: isDark ? 'rgba(255, 94, 58, 0.25)' : 'rgba(255, 94, 58, 0.2)',
+                opacity: isAllUploadEnabled ? 1 : 0.45,
               },
             ]}
+            accessibilityRole="button"
+            accessibilityLabel="All Upload"
+            accessibilityState={{ disabled: !isAllUploadEnabled }}
           >
-            <Text style={[styles.dismissButtonText, { color: isDark ? '#F4F4F5' : '#18181B' }]}>
-              Done
-            </Text>
+            <View style={styles.allUploadContentRow}>
+              <CloudUpload size={22} color="#FF5E3A" strokeWidth={2.4} />
+              <Text style={[styles.allUploadButtonText, { color: isDark ? '#F4F4F5' : '#18181B' }]}>
+                All Upload
+              </Text>
+              <ArrowRight size={20} color="#FF5E3A" strokeWidth={2.4} />
+            </View>
           </TouchableOpacity>
         </Animated.View>
       </View>
@@ -391,9 +434,10 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 16,
   },
-  dismissButton: {
+  allUploadButton: {
     marginTop: 18,
     paddingVertical: 18,
+    paddingHorizontal: 20,
     borderRadius: 28,
     borderWidth: 1,
     alignItems: 'center',
@@ -410,7 +454,13 @@ const styles = StyleSheet.create({
       },
     }),
   },
-  dismissButtonText: {
+  allUploadContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  allUploadButtonText: {
     fontFamily: FONTS.syne.bold,
     fontSize: 16,
     fontWeight: '700',
