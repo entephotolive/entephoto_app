@@ -9,6 +9,7 @@ import {
   Alert,
   Platform,
   ActivityIndicator,
+  Animated,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -586,6 +587,49 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     [eventId, eventTitle],
   );
 
+  // Floating Dock Animation & Favorite Logic
+  const [dockSlideAnim] = useState(() => new Animated.Value(0));
+
+  useEffect(() => {
+    if (selectedCount > 0) {
+      Animated.spring(dockSlideAnim, {
+        toValue: 1,
+        useNativeDriver: true,
+        damping: 24,
+        stiffness: 250,
+      }).start();
+    } else {
+      Animated.timing(dockSlideAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [selectedCount, dockSlideAnim]);
+
+  const selectedAreAllFavorites = useMemo(() => {
+    if (selectedPhotoIds.size === 0) return false;
+    for (const id of selectedPhotoIds) {
+      if (!favoritePhotoIds.has(id)) return false;
+    }
+    return true;
+  }, [selectedPhotoIds, favoritePhotoIds]);
+
+  const handleToggleFavoriteSelected = useCallback(() => {
+    setFavoritePhotoIds(prev => {
+      const next = new Set(prev);
+      const toRemove = selectedAreAllFavorites;
+      selectedPhotoIds.forEach(id => {
+        if (toRemove) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+      });
+      return next;
+    });
+  }, [selectedPhotoIds, selectedAreAllFavorites]);
+
   // ── Render: Single Grid Tile (shared for single, batch_photo row types) ──
   // Replaced inline renderPhotoTile with MemoizedPhotoTile
 
@@ -860,95 +904,155 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         />
 
         {/* ── 4. FLOATING BOTTOM ACTION DOCK ── */}
-        <View style={[styles.floatingDockContainer, { bottom: Math.max(insets.bottom, 16) + 8 }]}>
-          {/* Hard Clay Shadow Underlay */}
-          <View style={styles.floatingDockShadowUnderlay} />
-
-          {/* Dock Card Surface */}
+        <Animated.View
+          style={[
+            styles.floatingDockContainer,
+            {
+              bottom: Math.max(insets.bottom, 16) + 8,
+              opacity: dockSlideAnim,
+              transform: [
+                {
+                  translateY: dockSlideAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [100, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+          pointerEvents={selectedCount > 0 ? 'box-none' : 'none'}
+        >
           <View
             style={[
-              styles.floatingDockFace,
+              styles.floatingDockSurface,
               {
-                backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                borderColor: isDark ? '#2E2E36' : '#161616',
+                backgroundColor: isDark ? '#1C1C21' : '#FFFFFF',
+                borderColor: isDark ? '#2E2E36' : '#E8E8E8',
               },
             ]}
           >
             {/* Left Info: Icon Tile + Selected Counts */}
             <View style={styles.dockLeftSection}>
-              <View
-                style={[
-                  styles.dockIconTile,
-                  {
-                    backgroundColor: isDark ? '#2E221D' : '#FFE5D9',
-                    borderColor: isDark ? '#3E2F28' : '#161616',
-                  },
-                ]}
-              >
-                <Images size={22} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2.2} />
+              <View style={styles.dockThumbnailStackContainer}>
+                <View
+                  style={[
+                    styles.dockThumbnailUnderlay2,
+                    { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
+                  ]}
+                />
+                <View
+                  style={[
+                    styles.dockThumbnailUnderlay1,
+                    { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
+                  ]}
+                />
+                <View
+                  style={[
+                    styles.dockThumbnailTop,
+                    {
+                      borderColor: isDark ? '#1C1C21' : '#FFFFFF',
+                      backgroundColor: isDark ? '#26262E' : '#F4F4F5',
+                    },
+                  ]}
+                >
+                  <Images size={18} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={1.5} />
+                  {selectedCount > 0 &&
+                    Array.from(selectedPhotoIds)
+                      .slice(0, 1)
+                      .map(id => {
+                        const photo = photos.find(p => p.id === id);
+                        if (photo) {
+                          return (
+                            <ImageWithSkeleton
+                              key={photo.id}
+                              source={{ uri: photo.uri }}
+                              style={styles.dockThumbnailImage}
+                              resizeMode="cover"
+                            />
+                          );
+                        }
+                        return null;
+                      })}
+                </View>
               </View>
 
               <View style={styles.dockTextStack}>
                 <Text
                   style={[styles.dockSelectedCountText, { color: isDark ? '#F4F4F5' : '#161616' }]}
                 >
-                  {selectedCount} photos selected
+                  {selectedCount} selected
                 </Text>
-                <Text
-                  style={[styles.dockTotalCountText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}
-                >
-                  {totalCount} photos total
+                <Text style={[styles.dockSecondaryText, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
+                  Ready to upload
                 </Text>
               </View>
             </View>
 
-            {/* Right Action: Upload CTA Button with Tactile Depress */}
-            <Pressable
-              onPress={handleUploadPhotos}
-              disabled={isUploading || selectedCount === 0}
-              style={({ pressed }) => [
-                styles.dockUploadBtnWrapper,
-                (isUploading || selectedCount === 0) && styles.dockUploadBtnDisabledWrapper,
-                {
-                  transform: [
-                    { translateY: pressed && !isUploading && selectedCount > 0 ? 2 : 0 },
-                    { translateX: pressed && !isUploading && selectedCount > 0 ? 2 : 0 },
-                  ],
-                },
+            <View
+              style={[
+                styles.dockVerticalDivider,
+                { backgroundColor: isDark ? '#2E2E36' : '#E4E4E8' },
               ]}
-              accessibilityRole="button"
-              accessibilityLabel="Upload Photos"
-            >
-              <View
+            />
+
+            {/* Right Action: Action Buttons */}
+            <View style={styles.dockRightSection}>
+              {/* Favorite Button */}
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={handleToggleFavoriteSelected}
                 style={[
-                  styles.dockUploadBtnFace,
-                  (isUploading || selectedCount === 0) && styles.dockUploadBtnDisabledFace,
+                  styles.dockActionButton,
+                  {
+                    backgroundColor: isDark ? '#262224' : '#FFF0F0',
+                  },
+                ]}
+              >
+                <Heart
+                  size={16}
+                  color={selectedAreAllFavorites ? '#FF5E3A' : '#FF7657'}
+                  fill={selectedAreAllFavorites ? '#FF5E3A' : 'transparent'}
+                  strokeWidth={2}
+                />
+                <Text
+                  style={[
+                    styles.dockActionText,
+                    {
+                      color: selectedAreAllFavorites ? '#FF5E3A' : '#FF7657',
+                    },
+                  ]}
+                >
+                  Favorite
+                </Text>
+              </TouchableOpacity>
+
+              {/* Upload CTA Button */}
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={handleUploadPhotos}
+                disabled={isUploading || selectedCount === 0}
+                style={[
+                  styles.dockUploadButton,
+                  (isUploading || selectedCount === 0) && styles.dockUploadButtonDisabled,
                 ]}
               >
                 {isUploading ? (
                   <>
-                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 8 }} />
-                    <Text style={styles.dockUploadBtnText}>
-                      Uploading ({uploadProgress?.current || 0}/{uploadProgress?.total || 0})...
+                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 6 }} />
+                    <Text style={styles.dockUploadText}>
+                      ({uploadProgress?.current || 0}/{uploadProgress?.total || 0})
                     </Text>
                   </>
                 ) : (
                   <>
-                    <Text style={styles.dockUploadBtnText}>
-                      {selectedCount > 0 ? `Upload (${selectedCount})` : 'Upload Photos'}
-                    </Text>
-                    <ArrowRight
-                      size={18}
-                      color="#FFFFFF"
-                      strokeWidth={2.6}
-                      style={{ marginLeft: 8 }}
-                    />
+                    <Cloud size={16} color="#FFFFFF" strokeWidth={2.2} />
+                    <Text style={styles.dockUploadText}>Upload</Text>
                   </>
                 )}
-              </View>
-            </Pressable>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </Animated.View>
 
         {/* ── 5. FULL-SCREEN TWO-STAGE PHOTO VIEWER ── */}
         <FullScreenPhotoViewer
@@ -1891,80 +1995,135 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     right: 16,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000000',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.4,
+        shadowRadius: 16,
+      },
+      android: {
+        elevation: 12,
+      },
+    }),
   },
-  floatingDockShadowUnderlay: {
-    position: 'absolute',
-    top: 4,
-    left: 4,
-    right: -4,
-    bottom: -4,
-    borderRadius: 36,
-    backgroundColor: '#161616',
-  },
-  floatingDockFace: {
+  floatingDockSurface: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 36,
-    borderWidth: 2.4,
+    padding: 10,
+    borderRadius: 44,
+    borderWidth: 1.2,
+    borderTopWidth: 1.5,
   },
   dockLeftSection: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingLeft: 4,
     flex: 1,
   },
-  dockIconTile: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    borderWidth: 1.8,
+  dockThumbnailStackContainer: {
+    width: 38,
+    height: 38,
+    marginRight: 14,
+    marginLeft: 8,
+    position: 'relative',
+  },
+  dockThumbnailUnderlay2: {
+    position: 'absolute',
+    top: -3,
+    left: -4,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 2,
+    backgroundColor: '#6B7280',
+    transform: [{ rotate: '-8deg' }],
+  },
+  dockThumbnailUnderlay1: {
+    position: 'absolute',
+    top: -1,
+    left: -2,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 2,
+    backgroundColor: '#9CA3AF',
+    transform: [{ rotate: '-4deg' }],
+  },
+  dockThumbnailTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
+    overflow: 'hidden',
+  },
+  dockThumbnailImage: {
+    width: '100%',
+    height: '100%',
+    position: 'absolute',
   },
   dockTextStack: {
     justifyContent: 'center',
   },
   dockSelectedCountText: {
-    fontFamily: FONTS.syne.bold,
-    fontSize: 15.5,
-    fontWeight: '800',
-    letterSpacing: -0.3,
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: -0.2,
   },
-  dockTotalCountText: {
+  dockSecondaryText: {
     fontFamily: FONTS.plusJakartaSans.medium,
-    fontSize: 12,
-    marginTop: 1,
+    fontSize: 11.5,
+    marginTop: 2,
   },
-  dockUploadBtnWrapper: {
-    borderRadius: 28,
+  dockVerticalDivider: {
+    width: 1,
+    height: 32,
+    marginHorizontal: 12,
   },
-  dockUploadBtnDisabledWrapper: {
-    opacity: 0.65,
+  dockRightSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  dockUploadBtnFace: {
+  dockActionButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#161616',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 32,
+    gap: 6,
+  },
+  dockActionText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  dockUploadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#6366F1', // Premium periwinkle purple
     paddingHorizontal: 18,
-    paddingVertical: 13,
-    borderRadius: 28,
-    borderWidth: 1.5,
-    borderColor: '#161616',
+    paddingVertical: 12,
+    borderRadius: 32,
+    gap: 6,
   },
-  dockUploadBtnDisabledFace: {
-    backgroundColor: '#3A3A40',
-    borderColor: '#3A3A40',
+  dockUploadButtonDisabled: {
+    opacity: 0.65,
   },
-  dockUploadBtnText: {
-    fontFamily: FONTS.syne.bold,
-    fontSize: 14,
-    fontWeight: '800',
+  dockUploadText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
+    fontWeight: '700',
     color: '#FFFFFF',
-    letterSpacing: -0.2,
   },
 
   // ── 5. Modal Preview Styles ──
