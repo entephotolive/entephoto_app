@@ -37,7 +37,12 @@ import {
   subscribeToDcimPhotos,
   deleteLocalPhoto,
 } from '@/services/localPhotoService';
-import { uploadSinglePhoto, isValidObjectId } from '@/services/photoUploadService';
+import {
+  uploadSinglePhoto,
+  isValidObjectId,
+  UploadCancellationControl,
+  isUploadCancelledError,
+} from '@/services/photoUploadService';
 import { storageService } from '@/services/storageService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
@@ -108,6 +113,41 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
   const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
   const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
+
+  // Photos ref to access latest photo data inside long-running async workers without stale closures
+  const photosRef = React.useRef(photos);
+  useEffect(() => {
+    photosRef.current = photos;
+  }, [photos]);
+
+  // All Upload Queue & Session State
+  const allUploadQueueRef = React.useRef<string[]>([]);
+  const allUploadFailedIdsRef = React.useRef<Set<string>>(new Set());
+  const isAllUploadActiveRef = React.useRef(false);
+  const [isAllUploadActive, setIsAllUploadActive] = useState(false);
+  const isAllUploadPausedRef = React.useRef(false);
+  const [isAllUploadPaused, setIsAllUploadPaused] = useState(false);
+  const isAllUploadWorkerRunningRef = React.useRef(false);
+  const currentUploadControlRef = React.useRef<UploadCancellationControl | null>(null);
+  const currentUploadingPhotoIdRef = React.useRef<string | null>(null);
+  const processAllUploadQueueRef = React.useRef<() => void>(() => {});
+
+  // Dedicated cleanup effect for All Upload session on unmount
+  useEffect(() => {
+    const failedIds = allUploadFailedIdsRef.current;
+    return () => {
+      isAllUploadActiveRef.current = false;
+      isAllUploadPausedRef.current = false;
+      if (currentUploadControlRef.current) {
+        currentUploadControlRef.current.cancel();
+        currentUploadControlRef.current = null;
+      }
+      allUploadQueueRef.current = [];
+      failedIds.clear();
+      isAllUploadWorkerRunningRef.current = false;
+      currentUploadingPhotoIdRef.current = null;
+    };
+  }, []);
 
   // Floating Dock Animation & Favorite Logic
   const [dockSlideAnim] = useState(() => new Animated.Value(0));
@@ -199,6 +239,26 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           return prevPhotos;
         }
 
+        // If All Upload is active, append newly arriving unuploaded photos to the queue
+        if (isAllUploadActiveRef.current) {
+          let hasNewQueueItems = false;
+          merged.forEach(p => {
+            if (
+              p.status !== 'uploaded' &&
+              !allUploadFailedIdsRef.current.has(p.id) &&
+              !allUploadQueueRef.current.includes(p.id) &&
+              currentUploadingPhotoIdRef.current !== p.id
+            ) {
+              console.log(`[AllUpload] Appending new arrival to queue: ${p.filename || p.id}`);
+              allUploadQueueRef.current.push(p.id);
+              hasNewQueueItems = true;
+            }
+          });
+          if (hasNewQueueItems && !isAllUploadPausedRef.current) {
+            processAllUploadQueueRef.current?.();
+          }
+        }
+
         return merged;
       });
     }, 2000);
@@ -239,6 +299,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   const uploadedCount = useMemo(() => {
     return photos.filter(p => p.status === 'uploaded').length;
+  }, [photos]);
+
+  const unuploadedCount = useMemo(() => {
+    return photos.filter(p => p.status !== 'uploaded').length;
   }, [photos]);
 
   // Filtered Photo List (Only recompute on selection/favorite changes when activeFilter is 'Marked' or 'Favorites')
@@ -461,10 +525,242 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     await handleManualRescan();
   }, [handleManualRescan]);
 
+  // ── ALL UPLOAD QUEUE WORKER & CONTROLLER ──
+
+  // Process the All Upload queue sequentially one photo at a time
+  const processAllUploadQueue = useCallback(async () => {
+    if (isAllUploadWorkerRunningRef.current || !isAllUploadActiveRef.current) {
+      return;
+    }
+
+    isAllUploadWorkerRunningRef.current = true;
+
+    try {
+      while (isAllUploadActiveRef.current && !isAllUploadPausedRef.current) {
+        if (allUploadQueueRef.current.length === 0) {
+          console.log(
+            '[AllUpload] Queue empty. Remaining in active state for future new photos...',
+          );
+          setUploadProgress(null);
+          break;
+        }
+
+        const nextPhotoId = allUploadQueueRef.current.shift()!;
+        const photo = photosRef.current.find(p => p.id === nextPhotoId);
+
+        // Skip if photo was removed or already uploaded
+        if (!photo || photo.status === 'uploaded') {
+          continue;
+        }
+
+        currentUploadingPhotoIdRef.current = photo.id;
+        setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
+
+        const cancelControl = new UploadCancellationControl();
+        currentUploadControlRef.current = cancelControl;
+
+        progressAnim.setValue(0);
+        setUploadProgress({
+          current: 1,
+          total: allUploadQueueRef.current.length + 1,
+          filename: photo.filename,
+          bytePercentage: 0,
+        });
+
+        isUploadingRef.current = true;
+        setIsUploading(true);
+
+        try {
+          let lastStateUpdate = 0;
+          await uploadSinglePhoto(
+            eventId,
+            photo,
+            null,
+            percentage => {
+              Animated.timing(progressAnim, {
+                toValue: percentage,
+                duration: 200,
+                useNativeDriver: false,
+              }).start();
+
+              const now = Date.now();
+              if (now - lastStateUpdate > 250 || percentage >= 99.9) {
+                lastStateUpdate = now;
+                setUploadProgress(prev => (prev ? { ...prev, bytePercentage: percentage } : prev));
+              }
+            },
+            cancelControl,
+          );
+
+          if (!isAllUploadActiveRef.current) {
+            return;
+          }
+
+          progressAnim.setValue(100);
+          setUploadProgress(prev => (prev ? { ...prev, bytePercentage: 100 } : prev));
+          console.log(`[AllUpload] Photo ${photo.filename || photo.id} uploaded successfully.`);
+
+          setPhotos(prev =>
+            prev.map(p =>
+              p.id === photo.id || p.uri === photo.uri
+                ? { ...p, selected: false, status: 'uploaded' }
+                : p,
+            ),
+          );
+
+          setSelectedPhotoIds(prev => {
+            if (prev.has(photo.id)) {
+              const next = new Set(prev);
+              next.delete(photo.id);
+              return next;
+            }
+            return prev;
+          });
+        } catch (err: any) {
+          if (isUploadCancelledError(err) || cancelControl.isCancelled) {
+            console.log(`[AllUpload] Photo ${photo.filename || photo.id} upload cancelled.`);
+            if (isAllUploadActiveRef.current) {
+              allUploadQueueRef.current.unshift(photo.id);
+            }
+            break;
+          } else {
+            const errorMsg = err?.message || 'Upload failed';
+            console.error(
+              `[AllUpload] Photo ${photo.filename || photo.id} skipped due to error:`,
+              errorMsg,
+            );
+            allUploadFailedIdsRef.current.add(photo.id);
+          }
+        } finally {
+          currentUploadingPhotoIdRef.current = null;
+          currentUploadControlRef.current = null;
+          if (isAllUploadActiveRef.current) {
+            setUploadingPhotoIds(prev => {
+              const next = new Set(prev);
+              next.delete(photo.id);
+              return next;
+            });
+          }
+        }
+      }
+    } finally {
+      isAllUploadWorkerRunningRef.current = false;
+      if (
+        !isAllUploadActiveRef.current ||
+        allUploadQueueRef.current.length === 0 ||
+        isAllUploadPausedRef.current
+      ) {
+        isUploadingRef.current = false;
+        if (isAllUploadActiveRef.current) {
+          setIsUploading(false);
+        }
+      }
+      // If resumed while the worker was unwinding the previous cancelled photo, re-trigger processing
+      if (
+        isAllUploadActiveRef.current &&
+        !isAllUploadPausedRef.current &&
+        allUploadQueueRef.current.length > 0
+      ) {
+        processAllUploadQueueRef.current?.();
+      }
+    }
+  }, [eventId, progressAnim]);
+
+  // Keep processAllUploadQueueRef updated with the latest callback reference
+  useEffect(() => {
+    processAllUploadQueueRef.current = processAllUploadQueue;
+  }, [processAllUploadQueue]);
+
+  // Handler called when user confirms All Upload from GalleryActionsSheet
+  const startAllUpload = useCallback(() => {
+    setIsActionsModalVisible(false);
+
+    if (isUploadingRef.current && !isAllUploadActiveRef.current) {
+      Alert.alert('Upload in Progress', 'Please wait for the current upload to finish.');
+      return;
+    }
+
+    if (!eventId || !isValidObjectId(eventId)) {
+      Alert.alert(
+        'Invalid Event ID',
+        'No valid 24-character hex event ID is associated with this session.',
+      );
+      return;
+    }
+
+    isAllUploadActiveRef.current = true;
+    setIsAllUploadActive(true);
+    isAllUploadPausedRef.current = false;
+    setIsAllUploadPaused(false);
+
+    // Initial population: every photo in the entire gallery where status !== 'uploaded'
+    const unuploaded = photosRef.current.filter(p => p.status !== 'uploaded');
+    allUploadFailedIdsRef.current.clear();
+    allUploadQueueRef.current = unuploaded.map(p => p.id);
+
+    console.log(
+      `[AllUpload] Session started with ${allUploadQueueRef.current.length} unuploaded photos.`,
+    );
+
+    processAllUploadQueue();
+  }, [eventId, processAllUploadQueue]);
+
+  // Pause All Upload session
+  const pauseAllUpload = useCallback(() => {
+    if (!isAllUploadActiveRef.current || isAllUploadPausedRef.current) {
+      return;
+    }
+
+    console.log('[AllUpload] Pausing All Upload session...');
+    isAllUploadPausedRef.current = true;
+    setIsAllUploadPaused(true);
+
+    // Cancel active upload task if one is currently in flight
+    if (currentUploadControlRef.current) {
+      currentUploadControlRef.current.cancel();
+    }
+
+    // Re-queue the active photo ID to the front of the queue if not already there
+    if (currentUploadingPhotoIdRef.current) {
+      const activeId = currentUploadingPhotoIdRef.current;
+      if (!allUploadQueueRef.current.includes(activeId)) {
+        allUploadQueueRef.current.unshift(activeId);
+      }
+    }
+
+    // Reset progress display
+    setUploadProgress(null);
+    progressAnim.setValue(0);
+    isUploadingRef.current = false;
+    setIsUploading(false);
+  }, [progressAnim]);
+
+  // Resume All Upload session
+  const resumeAllUpload = useCallback(() => {
+    if (!isAllUploadActiveRef.current || !isAllUploadPausedRef.current) {
+      return;
+    }
+
+    console.log('[AllUpload] Resuming All Upload session...');
+    isAllUploadPausedRef.current = false;
+    setIsAllUploadPaused(false);
+
+    // Resume processing existing queue (the previously paused photo is at the front)
+    processAllUploadQueue();
+  }, [processAllUploadQueue]);
+
   // ── CORE UPLOAD BATCH HANDLER ──
   // This single function owns the upload process to strictly prevent concurrent upload bugs.
   const executeUploadBatch = useCallback(
     async (batchToUpload: GalleryPhotoItem[], showConfirmation: boolean = true) => {
+      if (isAllUploadActiveRef.current) {
+        Alert.alert(
+          'All Upload Active',
+          'An All Upload session is currently active. Manual uploads are disabled while All Upload is running.',
+        );
+        return;
+      }
+
       if (isUploadingRef.current) {
         console.warn('[PhotoGallery] Upload already in progress. Ignoring request.');
         return;
@@ -657,7 +953,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // Floating Dock Animation & Favorite Logic
 
   useEffect(() => {
-    if (selectedCount > 0 || isUploading) {
+    if (selectedCount > 0 || isUploading || isAllUploadActive) {
       Animated.spring(dockSlideAnim, {
         toValue: 1,
         useNativeDriver: true,
@@ -671,7 +967,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         useNativeDriver: true,
       }).start();
     }
-  }, [selectedCount, isUploading, dockSlideAnim]);
+  }, [selectedCount, isUploading, isAllUploadActive, dockSlideAnim]);
 
   useEffect(() => {
     if (!isUploading) {
@@ -1058,7 +1354,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               ],
             },
           ]}
-          pointerEvents={selectedCount > 0 || isUploading ? 'box-none' : 'none'}
+          pointerEvents={
+            selectedCount > 0 || isUploading || isAllUploadActive ? 'box-none' : 'none'
+          }
         >
           <View
             style={[
@@ -1069,7 +1367,127 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               },
             ]}
           >
-            {isUploading ? (
+            {isAllUploadActive ? (
+              <View style={styles.dockUploadStateContainer}>
+                {/* Top Row: Title + Progress/Status + Pause/Resume Button */}
+                <View style={styles.dockUploadTopRow}>
+                  <View style={styles.dockUploadTopLeft}>
+                    <Cloud
+                      size={18}
+                      color={isAllUploadPaused ? (isDark ? '#F59E0B' : '#D97706') : '#6366F1'}
+                      strokeWidth={2.2}
+                    />
+                    <Text
+                      style={[styles.dockProgressTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                    >
+                      All Upload
+                    </Text>
+                    {isAllUploadPaused ? (
+                      <View
+                        style={[
+                          styles.dockStatusBadge,
+                          { backgroundColor: isDark ? 'rgba(245, 158, 11, 0.18)' : '#FEF3C7' },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.dockStatusBadgeText,
+                            { color: isDark ? '#FBBF24' : '#D97706' },
+                          ]}
+                        >
+                          Paused
+                        </Text>
+                      </View>
+                    ) : !isUploading && !uploadProgress ? (
+                      <Text
+                        style={[
+                          styles.dockStatusIdleText,
+                          { color: isDark ? '#A1A1AA' : '#71717A' },
+                        ]}
+                      >
+                        • Waiting for new photos
+                      </Text>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.dockAllUploadRightRow}>
+                    {uploadProgress && (
+                      <Text style={[styles.dockProgressTitle, { color: '#6366F1' }]}>
+                        {uploadProgress.current} / {uploadProgress.total} photos
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                {/* Bottom Row */}
+                <View style={styles.dockUploadBottomRow}>
+                  {isAllUploadPaused ? (
+                    <View style={styles.dockIdleBottomRow}>
+                      <Text
+                        style={[
+                          styles.dockIdleBottomText,
+                          { color: isDark ? '#A1A1AA' : '#71717A' },
+                        ]}
+                      >
+                        Uploading paused. Tap Resume to continue.
+                      </Text>
+                    </View>
+                  ) : !isUploading && !uploadProgress ? (
+                    <View style={styles.dockIdleBottomRow}>
+                      <Text
+                        style={[
+                          styles.dockIdleBottomText,
+                          { color: isDark ? '#A1A1AA' : '#71717A' },
+                        ]}
+                      >
+                        All current photos uploaded • Watching folder for new arrivals
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View
+                        style={[
+                          styles.dockProgressBarTrack,
+                          {
+                            flex: 1,
+                            backgroundColor: isDark ? '#1C1C21' : '#EAEAEA',
+                            borderColor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)',
+                            borderWidth: 1,
+                          },
+                        ]}
+                      >
+                        <Animated.View
+                          style={[
+                            styles.dockProgressBarFill,
+                            {
+                              backgroundColor: '#6366F1',
+                              width: progressAnim.interpolate({
+                                inputRange: [0, 100],
+                                outputRange: ['0%', '100%'],
+                              }),
+                            },
+                          ]}
+                        />
+                      </View>
+                      <Text
+                        numberOfLines={1}
+                        style={[
+                          styles.dockProgressCount,
+                          {
+                            color: isDark ? '#A1A1AA' : '#71717A',
+                            minWidth: 38,
+                            flexShrink: 0,
+                            textAlign: 'right',
+                          },
+                        ]}
+                      >
+                        {Math.round(uploadProgress?.bytePercentage || 0)}%
+                      </Text>
+                    </>
+                  )}
+                </View>
+              </View>
+            ) : isUploading ? (
               <View style={styles.dockUploadStateContainer}>
                 {/* Top Row */}
                 <View style={styles.dockUploadTopRow}>
@@ -1277,6 +1695,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           totalCount={totalCount}
           selectedCount={selectedCount}
           newCount={newCount}
+          unuploadedCount={unuploadedCount}
+          isAllUploadActive={isAllUploadActive}
+          isAllUploadPaused={isAllUploadPaused}
           onRescan={handleRescanFromSheet}
           onSelectAll={handleSelectAll}
           onSelectAllNew={handleSelectAllNew}
@@ -1284,6 +1705,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onClearSelection={handleClearSelection}
           onUploadSelected={handleUploadFromSheet}
           onDeleteSelected={handleDeleteSelectedPhotos}
+          onStartAllUpload={startAllUpload}
+          onPauseAllUpload={pauseAllUpload}
+          onResumeAllUpload={resumeAllUpload}
         />
       </SafeAreaView>
     </AppBackground>
@@ -2280,6 +2704,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  dockAllUploadRightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  dockStatusBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 2,
+  },
+  dockStatusBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 10.5,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  dockStatusIdleText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 12,
+  },
+  dockIdleBottomRow: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  dockIdleBottomText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 11.5,
   },
   dockUploadBottomRow: {
     flexDirection: 'row',

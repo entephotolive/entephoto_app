@@ -42,6 +42,74 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 /**
+ * Custom error thrown when an upload is aborted by caller request.
+ */
+export class UploadCancelledError extends Error {
+  constructor(message = 'Upload was cancelled') {
+    super(message);
+    this.name = 'UploadCancelledError';
+  }
+}
+
+/**
+ * Helper to identify whether an error resulted from an intentional upload cancellation.
+ */
+export function isUploadCancelledError(error: any): boolean {
+  if (!error) return false;
+  if (error instanceof UploadCancelledError || error?.name === 'UploadCancelledError') {
+    return true;
+  }
+  const msg = String(error?.message || error).toLowerCase();
+  return (
+    msg.includes('upload was cancelled') ||
+    msg.includes('network task cancelled') ||
+    msg.includes('canceled') ||
+    msg.includes('cancelled')
+  );
+}
+
+/**
+ * Small cancellation control abstraction that bridges the caller and the active FileSystem.UploadTask.
+ */
+export class UploadCancellationControl {
+  private _isCancelled = false;
+  private _uploadTask: FileSystem.UploadTask | null = null;
+
+  /** True if cancellation has been requested. */
+  get isCancelled(): boolean {
+    return this._isCancelled;
+  }
+
+  /** The active UploadTask instance once created. */
+  get uploadTask(): FileSystem.UploadTask | null {
+    return this._uploadTask;
+  }
+
+  /** Called internally by uploadSinglePhoto once the task is created. */
+  setUploadTask(task: FileSystem.UploadTask | null): void {
+    this._uploadTask = task;
+    if (this._isCancelled && task) {
+      task.cancelAsync().catch(err => {
+        console.warn('[UploadCancellationControl] Error cancelling late-registered task:', err);
+      });
+    }
+  }
+
+  /** Request cancellation of the upload. */
+  async cancel(): Promise<void> {
+    if (this._isCancelled) return;
+    this._isCancelled = true;
+    if (this._uploadTask) {
+      try {
+        await this._uploadTask.cancelAsync();
+      } catch (err) {
+        console.warn('[UploadCancellationControl] Error calling cancelAsync on task:', err);
+      }
+    }
+  }
+}
+
+/**
  * Returns the MIME type based on file extension.
  */
 function getMimeTypeFromFilename(filename?: string): string {
@@ -68,13 +136,20 @@ function getMimeTypeFromFilename(filename?: string): string {
 
 /**
  * Uploads a single photo to POST /api/upload-images/ with lossy pre-compression to ~2MB.
+ * Supports optional UploadCancellationControl to allow immediate abort of compression and network upload.
  */
 export async function uploadSinglePhoto(
   eventId: string,
   photo: GalleryPhotoItem,
   folderId?: string | null,
   onProgress?: (progress: number) => void,
+  cancelControl?: UploadCancellationControl,
 ): Promise<UploadPhotoResponse> {
+  // Early cancellation check before starting work
+  if (cancelControl?.isCancelled) {
+    throw new UploadCancelledError('Upload was cancelled before starting.');
+  }
+
   // 1. Validate eventId (24-char hex)
   if (!isValidObjectId(eventId)) {
     const msg = `[photoUploadService] Invalid eventId: "${eventId}". Must be a 24-character hex MongoDB ObjectId.`;
@@ -117,6 +192,12 @@ export async function uploadSinglePhoto(
     // compressToTargetSize skips encoding for JPEG files already ≤ 4 MB;
     // otherwise iteratively reduces quality, always outputting JPEG.
     const compressionResult = await compressToTargetSize(sourceUri, TARGET_UPLOAD_BYTES);
+
+    // Cancellation check after compression finishes
+    if (cancelControl?.isCancelled) {
+      throw new UploadCancelledError('Upload was cancelled during compression.');
+    }
+
     let finalUploadUri = compressionResult.uri;
     const finalSizeBytes = compressionResult.sizeBytes;
 
@@ -153,6 +234,11 @@ export async function uploadSinglePhoto(
       );
     }
 
+    // Cancellation check after file rename/move
+    if (cancelControl?.isCancelled) {
+      throw new UploadCancelledError('Upload was cancelled before network request.');
+    }
+
     // 5. Client-side size guard (25 MB Django default).
     if (finalSizeBytes > MAX_UPLOAD_BYTES) {
       const sizeMb = (finalSizeBytes / (1024 * 1024)).toFixed(1);
@@ -176,7 +262,7 @@ export async function uploadSinglePhoto(
       ...(additionalParams.folder_id ? { folder_id: additionalParams.folder_id } : {}),
     });
 
-    // 6. Upload via FileSystem.createUploadTask to support byte-level progress
+    // 6. Upload via FileSystem.createUploadTask to support byte-level progress and cancellation
     let uploadResult: FileSystem.FileSystemUploadResult;
     try {
       const uploadTask = FileSystem.createUploadTask(
@@ -199,12 +285,27 @@ export async function uploadSinglePhoto(
         },
       );
 
+      // Connect the created task to the cancellation control
+      cancelControl?.setUploadTask(uploadTask);
+
+      // Check if cancellation was triggered right as task was created
+      if (cancelControl?.isCancelled) {
+        await uploadTask.cancelAsync().catch(() => {});
+        throw new UploadCancelledError('Upload was cancelled before starting network transfer.');
+      }
+
       const result = await uploadTask.uploadAsync();
       if (!result) {
+        if (cancelControl?.isCancelled) {
+          throw new UploadCancelledError('Upload task was cancelled.');
+        }
         throw new Error('Upload task returned null result.');
       }
       uploadResult = result;
     } catch (networkErr: any) {
+      if (cancelControl?.isCancelled || isUploadCancelledError(networkErr)) {
+        throw new UploadCancelledError('Upload was cancelled during network transfer.');
+      }
       console.error(
         '[photoUploadService] uploadAsync network failure:',
         networkErr?.message ?? networkErr,
@@ -276,7 +377,10 @@ export async function uploadSinglePhoto(
     });
     return responseData;
   } finally {
-    // 10. Clean up all temp files (compressed output + renamed copy) after upload finishes.
+    // Disconnect task from control
+    cancelControl?.setUploadTask(null);
+
+    // 10. Clean up all temp files (compressed output + renamed copy) after upload finishes or cancels.
     for (const tempUri of tempUrisToCleanup) {
       await cleanupTempFile(tempUri);
     }

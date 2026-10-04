@@ -20,6 +20,8 @@ import {
   CloudUpload,
   Layers,
   ArrowRight,
+  Pause,
+  Play,
 } from 'lucide-react-native';
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
@@ -31,6 +33,9 @@ interface GalleryActionsSheetProps {
   totalCount: number;
   selectedCount: number;
   newCount: number;
+  unuploadedCount: number;
+  isAllUploadActive?: boolean;
+  isAllUploadPaused?: boolean;
   onRescan: () => void;
   onSelectAll: () => void;
   onSelectAllNew: () => void;
@@ -38,6 +43,9 @@ interface GalleryActionsSheetProps {
   onClearSelection: () => void;
   onUploadSelected: () => void;
   onDeleteSelected: () => void;
+  onStartAllUpload?: () => void;
+  onPauseAllUpload?: () => void;
+  onResumeAllUpload?: () => void;
 }
 
 interface ActionTileItem {
@@ -57,6 +65,9 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
   totalCount,
   selectedCount,
   newCount,
+  unuploadedCount,
+  isAllUploadActive = false,
+  isAllUploadPaused = false,
   onRescan,
   onSelectAll,
   onSelectAllNew,
@@ -64,12 +75,15 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
   onClearSelection,
   onUploadSelected,
   onDeleteSelected,
+  onStartAllUpload,
+  onPauseAllUpload,
+  onResumeAllUpload,
 }) => {
   const insets = useSafeAreaInsets();
-  const isAllUploadEnabled = newCount > 0;
+  const isButtonEnabled = isAllUploadActive ? true : unuploadedCount > 0;
 
   const handleAllUploadPress = () => {
-    if (!isAllUploadEnabled) return;
+    if (!isButtonEnabled) return;
 
     Alert.alert(
       'Start All Upload?',
@@ -83,14 +97,51 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
           text: 'Start Upload',
           style: 'default',
           onPress: () => {
-            // Foundation step: Confirmation acknowledged.
-            // Upload queue / background processing will be wired in future steps.
+            onStartAllUpload?.();
           },
         },
       ],
       { cancelable: true },
     );
   };
+
+  const handlePrimaryButtonClick = () => {
+    if (!isButtonEnabled) return;
+
+    if (isAllUploadActive) {
+      if (isAllUploadPaused) {
+        onResumeAllUpload?.();
+      } else {
+        onPauseAllUpload?.();
+      }
+      onClose();
+      return;
+    }
+
+    // Normal State A: confirmation dialog
+    handleAllUploadPress();
+  };
+
+  const buttonLabel = isAllUploadActive
+    ? isAllUploadPaused
+      ? 'Resume Upload'
+      : 'Pause Upload'
+    : 'All Upload';
+
+  const buttonIcon = isAllUploadActive ? (
+    isAllUploadPaused ? (
+      <Play size={22} color="#6366F1" fill="#6366F1" strokeWidth={2.4} />
+    ) : (
+      <Pause
+        size={22}
+        color={isDark ? '#FFA085' : '#FF5E3A'}
+        fill={isDark ? '#FFA085' : '#FF5E3A'}
+        strokeWidth={2.4}
+      />
+    )
+  ) : (
+    <CloudUpload size={22} color="#FF5E3A" strokeWidth={2.4} />
+  );
 
   // Animation values for sheet slide-up and staggered tile bounce
   const sheetAnim = useMemo(() => new Animated.Value(0), []);
@@ -324,26 +375,53 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
           {/* Primary All Upload Action Button */}
           <TouchableOpacity
             activeOpacity={0.8}
-            onPress={handleAllUploadPress}
-            disabled={!isAllUploadEnabled}
+            onPress={handlePrimaryButtonClick}
+            disabled={!isButtonEnabled}
             style={[
               styles.allUploadButton,
               {
                 backgroundColor: isDark ? '#191922' : '#FFFFFF',
-                borderColor: isDark ? 'rgba(255, 94, 58, 0.25)' : 'rgba(255, 94, 58, 0.2)',
-                opacity: isAllUploadEnabled ? 1 : 0.45,
+                borderColor: isAllUploadActive
+                  ? isAllUploadPaused
+                    ? isDark
+                      ? 'rgba(99, 102, 241, 0.35)'
+                      : 'rgba(99, 102, 241, 0.25)'
+                    : isDark
+                      ? 'rgba(255, 94, 58, 0.35)'
+                      : 'rgba(255, 94, 58, 0.25)'
+                  : isDark
+                    ? 'rgba(255, 94, 58, 0.25)'
+                    : 'rgba(255, 94, 58, 0.2)',
+                opacity: isButtonEnabled ? 1 : 0.45,
               },
             ]}
             accessibilityRole="button"
-            accessibilityLabel="All Upload"
-            accessibilityState={{ disabled: !isAllUploadEnabled }}
+            accessibilityLabel={buttonLabel}
+            accessibilityState={{ disabled: !isButtonEnabled }}
           >
             <View style={styles.allUploadContentRow}>
-              <CloudUpload size={22} color="#FF5E3A" strokeWidth={2.4} />
-              <Text style={[styles.allUploadButtonText, { color: isDark ? '#F4F4F5' : '#18181B' }]}>
-                All Upload
+              {buttonIcon}
+              <Text
+                style={[
+                  styles.allUploadButtonText,
+                  {
+                    color: isDark ? '#F4F4F5' : '#18181B',
+                  },
+                ]}
+              >
+                {buttonLabel}
               </Text>
-              <ArrowRight size={20} color="#FF5E3A" strokeWidth={2.4} />
+              <ArrowRight
+                size={20}
+                color={
+                  isAllUploadActive && isAllUploadPaused
+                    ? '#6366F1'
+                    : isDark
+                      ? '#FFA085'
+                      : '#FF5E3A'
+                }
+                strokeWidth={2.4}
+              />
             </View>
           </TouchableOpacity>
         </Animated.View>
