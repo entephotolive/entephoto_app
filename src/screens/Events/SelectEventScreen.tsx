@@ -13,11 +13,13 @@ import {
   Modal,
   Alert,
   Animated,
+  Linking,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import {
   Search,
   SlidersHorizontal,
+  Plus,
   Calendar,
   Image as ImageIcon,
   Check,
@@ -313,6 +315,32 @@ export const SelectEventScreen: React.FC = () => {
     ]);
   }, [logout]);
 
+  const handleCreateEvent = useCallback(async () => {
+    const rawUrl = process.env.EXPO_PUBLIC_REDIRECT_URL;
+    const trimmedBase = rawUrl?.trim();
+
+    if (
+      !trimmedBase ||
+      (!trimmedBase.startsWith('http://') && !trimmedBase.startsWith('https://'))
+    ) {
+      Alert.alert(
+        'Configuration Error',
+        'No valid redirect URL configured. Please check your application settings.',
+      );
+      return;
+    }
+
+    const cleanBase = trimmedBase.replace(/\/+$/, '');
+    const destinationUrl = `${cleanBase}/photographer/events`;
+
+    try {
+      await Linking.openURL(destinationUrl);
+    } catch (error) {
+      console.error('[SelectEventScreen] Failed to open create event URL:', error);
+      Alert.alert('Error', 'Unable to open the create event page. Please try again later.');
+    }
+  }, []);
+
   const renderEventCard = useCallback(
     ({ item }: { item: EventModel }) => {
       const isSelected = selectedEventId === item._id.$oid;
@@ -586,6 +614,23 @@ export const SelectEventScreen: React.FC = () => {
                 accessibilityLabel="Search events"
               />
             </View>
+
+            {/* Create Event (+) Button */}
+            <TouchableOpacity
+              activeOpacity={0.75}
+              onPress={handleCreateEvent}
+              accessibilityRole="button"
+              accessibilityLabel="Create new event"
+              style={[
+                styles.createEventButton,
+                {
+                  backgroundColor: isDark ? '#1A1A1E' : 'rgba(239, 233, 223, 0.65)',
+                  borderColor: isDark ? '#2E2E36' : 'transparent',
+                },
+              ]}
+            >
+              <Plus size={20} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={2.2} />
+            </TouchableOpacity>
 
             {/* Filter Button — animated */}
             <Animated.View
@@ -1908,6 +1953,16 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.plusJakartaSans.bold,
     fontSize: 15,
     fontWeight: '700',
+  },
+
+  // Create Event Button
+  createEventButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // Animated Filter Button
