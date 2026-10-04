@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    USB device filter for Sony cameras.
+
+    Sony Electronics vendor ID: 0x054C
+    Product IDs are intentionally omitted so that ALL Sony USB-connected
+    cameras are matched (Alpha, ZV, FX, RX series all share the same VID
+    but vary in PID across firmware revisions).  Android will open a
+    permission dialog for any device whose vendor ID matches.
+
+    We do NOT request USB_PERMISSION at startup — we only request it when
+    the UsbManager.ACTION_USB_DEVICE_ATTACHED broadcast fires, so the dialog
+    appears exactly once per physical plug-in.
+-->
+<resources>
+    <!--
+        vendorId  = 0x054C  (Sony Corporation)
+        class     = 0x06    (Still Image / PTP/MTP)
+        subclass  = 0x01
+        protocol  = 0x01    (PTP; MTP uses 0x00 but shares the same VID)
+    -->
+    <usb-device
+        vendorId="0x054C"
+        class="6"
+        subclass="1"
+        protocol="1" />
+
+    <!--
+        Fallback entry without class/subclass/protocol constraints so that
+        cameras exposing slightly different descriptors (e.g. "Sony Imaging
+        Products & Solutions" sub-brands) are still matched.
+    -->
+    <usb-device vendorId="0x054C" />
+</resources>

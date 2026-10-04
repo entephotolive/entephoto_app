@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rounded background for the MIME type badge in item_import_log.xml -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="4dp" />
+    <!-- Colour is overridden programmatically in ImportLogAdapter per MIME type -->
+    <solid android:color="@color/accent_blue" />
+</shape>

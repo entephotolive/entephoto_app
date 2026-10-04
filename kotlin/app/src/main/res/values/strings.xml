@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">entephoto</string>
+
+    <!-- Status labels -->
+    <string name="status_waiting">Waiting for Camera</string>
+    <string name="status_detail_waiting">Plug your Sony camera into this device via USB</string>
+    <string name="status_permission_requested">Tap Allow in the dialog above</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connecting_detail">Verifying USB mode</string>
+    <string name="status_connected">Camera Connected</string>
+
+    <!-- PC Remote error — guidance when camera is in wrong mode -->
+    <string name="error_pc_remote_title">Wrong USB Mode Detected</string>
+    <string name="error_pc_remote_body">Set USB Connection to PC Remote, not MTP.\n\nPC Remote mode allows this app to detect captures and download them instantly without interrupting shooting. MTP mode blocks the shutter while connected.</string>
+    <string name="error_pc_remote_step1">① Unplug the USB cable from the camera</string>
+    <string name="error_pc_remote_step2">② On camera: Menu → Setup → USB Connection → PC Remote</string>
+    <string name="error_pc_remote_step3">③ Re-plug the USB cable</string>
+
+    <!-- Permission denied -->
+    <string name="error_permission_denied_title">USB Permission Denied</string>
+    <string name="error_permission_denied_body">Re-plug the USB cable and tap Allow when prompted.</string>
+
+    <!-- Camera info -->
+    <string name="camera_storages">%d storage card(s) accessible</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_usb_icon">USB connection icon</string>
+    <string name="cd_warning_icon">Warning icon</string>
+    <string name="cd_connected_icon">Connected checkmark icon</string>
+
+    <!-- Waiting screen — Connection help button -->
+    <string name="btn_connection_help">Connection help</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">USB Import</string>
+    <string name="notification_importing">Importing photos from Sony camera…</string>
+    <string name="notification_waiting">Waiting for Sony camera…</string>
+
+    <!-- Page 2 — import log -->
+    <string name="page2_title">Importing Photos</string>
+    <string name="page2_recent_label">RECENT IMPORTS</string>
+    <string name="page2_empty">No photos imported yet.\nNew shots will appear here automatically.</string>
+    <string name="page2_last_event_default">Waiting for first poll cycle…</string>
+
+    <plurals name="import_count">
+        <item quantity="one">%d photo imported</item>
+        <item quantity="other">%d photos imported</item>
+    </plurals>
+
+    <string name="website_domain">entephoto.co.in</string>
+</resources>

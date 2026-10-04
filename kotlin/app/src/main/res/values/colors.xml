@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ── Base palette ───────────────────────────────────────────── -->
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- ── Dark Green background palette ─────────────────────────── -->
+    <!--  bg_dark / bg_green: complete background full in dark green colour -->
+    <color name="bg_dark">#FF1B5E20</color>
+    <color name="bg_green">#FF1B5E20</color>
+    <color name="bg_red">#FFE53935</color>
+    <color name="bg_yellow">#FFFFD600</color>
+    <!--  surface: slightly elevated card background                  -->
+    <color name="surface">#FF1C1C24</color>
+    <color name="surface_stroke">#FF2A2A38</color>
+
+    <!-- ── Text ──────────────────────────────────────────────────── -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FF9899A6</color>
+
+    <!-- ── Accent — blue for idle/connecting ─────────────────────── -->
+    <color name="accent_blue">#FF4D8EFF</color>
+    <color name="accent_blue_dim">#FF1A3566</color>
+
+    <!-- ── Error (PC Remote) — deep red ──────────────────────────── -->
+    <color name="error_surface">#FF1F0C0C</color>
+    <color name="error_stroke">#FF6B1414</color>
+    <color name="error_accent">#FFFF5252</color>
+    <color name="error_steps_bg">#FF2C1010</color>
+    <color name="text_on_error">#FFDDCCCC</color>
+
+    <!-- ── Success (Connected) — deep green ──────────────────────── -->
+    <color name="success_surface">#FF0C1F0E</color>
+    <color name="success_stroke">#FF1A5C22</color>
+    <color name="success_accent">#FF4CAF74</color>
+
+    <!-- ── Warning (permission denied) — amber ───────────────────── -->
+    <color name="warn_surface">#FF1F1700</color>
+    <color name="warn_stroke">#FF5C4200</color>
+    <color name="warn_accent">#FFFFB347</color>
+
+    <!-- ── Page 2 status-banner state colors ─────────────────────── -->
+    <!--
+        Design principle (Step 6): "surfacing camera busy as a CALM
+        status rather than an error is important for photographer trust".
+        Amber is used for the busy state (not red) so it reads as
+        "normal shooting activity" not "something is broken".
+    -->
+
+    <!-- Watching — teal: calm, connected, all is well -->
+    <color name="status_watching_accent">#FF4CAF74</color>
+    <color name="status_watching_surface">#1A4CAF74</color>
+
+    <!-- Importing — blue: active data transfer in progress -->
+    <color name="status_importing_accent">#FF4D8EFF</color>
+    <color name="status_importing_surface">#1A4D8EFF</color>
+
+    <!-- Camera busy — warm amber: normal burst activity, NOT an error -->
+    <color name="status_busy_accent">#FFFFC107</color>
+    <color name="status_busy_surface">#1AFFC107</color>
+
+    <!-- Disconnected — neutral grey: camera is gone, session ended -->
+    <color name="status_disconnected_accent">#FF9899A6</color>
+    <color name="status_disconnected_surface">#1A9899A6</color>
+
+    <!-- Remote Shooting — electric violet: PC Remote mode, instant capture armed -->
+    <!--  Chosen to be clearly distinct from all four MTP states above.           -->
+    <color name="status_remote_accent">#FFA855F7</color>
+    <color name="status_remote_surface">#1AA855F7</color>
+</resources>
+

@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AndroidManifest.xml — entephoto USB Importer
+    ===================================================
+    Permission philosophy
+    ─────────────────────
+    • FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC  → needed so the
+      import service survives while the photographer is shooting.
+    • USE_USB            → declared automatically by the USB host feature;
+      explicit here for clarity.
+    • NO camera-control permissions (CAMERA, android.permission.ACCESS_CAMERA,
+      etc.) are requested — this app is architecturally read-only PTP.
+      It only issues: GetObjectHandles, GetObjectInfo, GetObject.
+      It never sends InitiateCapture or any ControlDevice operation.
+-->
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ── Permissions ──────────────────────────────────────────────── -->
+
+    <!--
+        USB host mode: lets us open UsbDevice connections.
+        The <uses-feature> below ensures the app is not installed on
+        devices without USB host support.
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="true" />
+
+    <!--
+        Foreground service: keeps the import loop alive without being
+        killed by the OS while the photographer is actively shooting.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!--
+        Foreground service type — DATA_SYNC is the correct type for
+        transferring data from external hardware (API 34+).
+        On API < 34 this attribute is silently ignored.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!--
+        POST_NOTIFICATIONS — required on API 33+ to show the persistent
+        foreground-service notification.  We request this at runtime in
+        MainActivity before starting the service.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        WRITE_EXTERNAL_STORAGE — only needed on API ≤ 28; on API 29+
+        we use MediaStore with no storage permission required.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
+
+    <!--
+        READ_MEDIA_IMAGES — API 33+; lets the import log screen read
+        back the thumbnails we wrote to MediaStore.
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+    <!-- ── Application ──────────────────────────────────────────────── -->
+
+    <application
+        android:name=".PhotoCeremonyApp"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_usb_import"
+        android:roundIcon="@drawable/ic_usb_import"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.entephoto"
+        tools:targetApi="31">
+
+        <!-- ── MainActivity (entry point + permission gate) ──────── -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+                USB_DEVICE_ATTACHED: Android calls this intent when a
+                matching USB device is plugged in.  Combined with
+                android:resource pointing to device_filter.xml, the system
+                will:
+                  1. Auto-launch (or bring to front) this activity, AND
+                  2. Optionally show the "Always open with…" dialog.
+                The activity then forwards control to ImportService.
+            -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+
+        </activity>
+
+        <!-- ── ImportService (foreground, read-only PTP) ─────────── -->
+        <!--
+            This service ONLY sends PTP read operations:
+              • GetDeviceInfo      (session open)
+              • OpenSession
+              • GetStorageIDs
+              • GetObjectHandles
+              • GetObjectInfo
+              • GetObject          (file bytes)
+              • CloseSession       (session close)
+            It NEVER sends InitiateCapture, SetDevicePropValue,
+            SendObjectInfo, SendObject, or any write/control command.
+            This is the architectural guarantee that the app cannot
+            seize the shutter or disrupt the photographer's workflow.
+        -->
+        <service
+            android:name=".service.ImportService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- ── ImportLogActivity (Page 2 — live import log) ──────── -->
+        <!--
+            Not exported; only ever launched explicitly by MainActivity
+            when ConnectionState.Connected is reached.
+            launchMode=singleTop: if already on screen when the camera
+            is re-plugged and reconnects, onNewIntent brings it to the
+            front rather than creating a second instance.
+        -->
+        <activity
+            android:name=".ui.ImportLogActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!-- ── ConnectionGuideActivity (guide + checklist screen) ───── -->
+        <!--
+            Opened on first launch automatically (MainActivity checks
+            GuidePreferences.hasSeenGuide) and any time the user taps
+            the "Connection help" TextButton on the waiting screen.
+            Not exported; parentActivityName enables the Up button.
+        -->
+        <activity
+            android:name=".ui.ConnectionGuideActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>
