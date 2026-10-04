@@ -76,6 +76,8 @@ export interface FullScreenPhotoViewerProps {
   onClose: () => void;
   /** Toggles photo.selected (for BULK upload queue) – synced with gallery grid */
   onToggleMark: (id: string) => void;
+  onToggleFavorite: (id: string) => void;
+  favoritePhotoIds: Set<string>;
   onUploadPhoto: (photo: GalleryPhotoItem) => void;
   onDeletePhoto: (photo: GalleryPhotoItem) => void;
   isDark?: boolean;
@@ -90,6 +92,8 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   eventSubtitle = '05 Sep 2026 • Wedding',
   onClose,
   onToggleMark,
+  onToggleFavorite,
+  favoritePhotoIds,
   onUploadPhoto,
   onDeletePhoto,
 }) => {
@@ -382,7 +386,8 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   // ── Early exit ─────────────────────────────────────────────────────────────
   if (!visible || !currentPhoto) return null;
 
-  const isSelected = currentPhoto.selected; // bulk-upload queue
+  const isSelected = currentPhoto.selected;
+  const isFavorite = favoritePhotoIds.has(currentPhoto.id); // bulk-upload queue
   const isUploaded = currentPhoto.status === 'uploaded';
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -578,24 +583,21 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
               {/* FAVOURITE — keeper/heart flag (does NOT add to upload queue) */}
               <Pressable
                 onPress={() => {
-                  // Favourite = mark without toggling selected.
-                  // We reuse onToggleMark here since both share the status='marked'
-                  // semantics; the gallery handler already keeps them in sync.
-                  onToggleMark(currentPhoto.id);
+                  onToggleFavorite(currentPhoto.id);
                 }}
                 style={({ pressed }) => [styles.dockItem, { opacity: pressed ? 0.75 : 1 }]}
                 accessibilityRole="button"
-                accessibilityLabel="Favourite"
+                accessibilityLabel={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
               >
-                <View style={[styles.dockIconBox, isSelected && styles.dockIconBoxHeart]}>
+                <View style={[styles.dockIconBox, isFavorite && styles.dockIconBoxHeart]}>
                   <Heart
                     size={24}
-                    color={isSelected ? '#FF5E3A' : '#3F3F46'}
+                    color={isFavorite ? '#FF5E3A' : '#3F3F46'}
                     strokeWidth={2}
-                    fill={isSelected ? '#FF5E3A' : 'transparent'}
+                    fill={isFavorite ? '#FF5E3A' : 'transparent'}
                   />
                 </View>
-                <Text style={[styles.dockLabel, isSelected && styles.dockLabelActive]}>
+                <Text style={[styles.dockLabel, isFavorite && styles.dockLabelActive]}>
                   Favourite
                 </Text>
               </Pressable>

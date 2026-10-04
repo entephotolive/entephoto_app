@@ -20,6 +20,7 @@ import {
   Cloud,
   Camera,
   RefreshCw,
+  Heart,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -36,6 +37,7 @@ import {
   PHOTO_STORAGE_DISPLAY_PATH,
 } from '@/services/localPhotoService';
 import { uploadSinglePhoto, isValidObjectId } from '@/services/photoUploadService';
+import { storageService } from '@/services/storageService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
 import { ImageWithSkeleton } from './components/ImageWithSkeleton';
@@ -66,7 +68,7 @@ export interface GalleryPhotoItem {
   dimensions?: string;
 }
 
-type FilterTab = 'All' | 'New' | 'Marked' | 'Uploaded';
+type FilterTab = 'All' | 'Favorites' | 'Marked' | 'Uploaded';
 
 export const PhotoSelectionGalleryScreen: React.FC = () => {
   const navigation = useNavigation<AppNavigationProp>();
@@ -99,6 +101,42 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   } | null>(null);
   const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
+  const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
+  const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
+
+  // Restore favorited photos from local storage on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadFavorites() {
+      try {
+        const savedIds = await storageService.getFavoritePhotoIds();
+        if (isMounted && savedIds && savedIds.length > 0) {
+          setFavoritePhotoIds(new Set(savedIds));
+        }
+      } catch (error) {
+        console.error('[Gallery] Failed to load favorite photo IDs from storage:', error);
+      } finally {
+        if (isMounted) {
+          setIsFavoritesLoaded(true);
+        }
+      }
+    }
+    loadFavorites();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Save favorite photo IDs to local storage whenever they change (after hydration)
+  useEffect(() => {
+    if (!isFavoritesLoaded) {
+      return; // Prevent saving empty state before hydration completes
+    }
+    const idsArray = Array.from(favoritePhotoIds);
+    storageService.setFavoritePhotoIds(idsArray).catch(error => {
+      console.error('[Gallery] Failed to save favorite photo IDs:', error);
+    });
+  }, [favoritePhotoIds, isFavoritesLoaded]);
 
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
@@ -159,34 +197,52 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   const selectedCount = useMemo(() => {
     return selectedPhotoIds.size;
-  }, [photos]);
+  }, [selectedPhotoIds]);
+
+  const favoriteCount = favoritePhotoIds.size;
 
   const newCount = useMemo(() => {
     return photos.filter(p => p.status === 'new').length;
   }, [photos]);
 
   const markedCount = useMemo(() => {
-    return photos.filter(p => p.status === 'marked' || selectedPhotoIds.has(p.id)).length;
-  }, [photos]);
+    let count = 0;
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      if (selectedPhotoIds.has(p.id) || favoritePhotoIds.has(p.id) || p.status === 'marked') {
+        count++;
+      }
+    }
+    return count;
+  }, [photos, selectedPhotoIds, favoritePhotoIds]);
 
   const uploadedCount = useMemo(() => {
     return photos.filter(p => p.status === 'uploaded').length;
   }, [photos]);
 
-  // Filtered Photo List
+  // Filtered Photo List (Only recompute on selection/favorite changes when activeFilter is 'Marked' or 'Favorites')
+  const isMarkedTab = activeFilter === 'Marked';
+  const isFavoritesTab = activeFilter === 'Favorites';
   const filteredPhotos = useMemo(() => {
     switch (activeFilter) {
-      case 'New':
-        return photos.filter(p => p.status === 'new');
+      case 'Favorites':
+        return photos.filter(p => favoritePhotoIds.has(p.id));
       case 'Marked':
-        return photos.filter(p => selectedPhotoIds.has(p.id) || p.status === 'marked');
+        return photos.filter(
+          p => selectedPhotoIds.has(p.id) || favoritePhotoIds.has(p.id) || p.status === 'marked',
+        );
       case 'Uploaded':
         return photos.filter(p => p.status === 'uploaded');
       case 'All':
       default:
         return photos;
     }
-  }, [photos, activeFilter, selectedPhotoIds]);
+  }, [
+    photos,
+    activeFilter,
+    isMarkedTab ? selectedPhotoIds : null,
+    isMarkedTab || isFavoritesTab ? favoritePhotoIds : null,
+  ]);
 
   /**
    * Gallery batches — computed from date-based photo batching.
@@ -213,71 +269,52 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
   }, [navigation]);
 
-  // Toggle Photo Selection with 20-photo maximum limit
-  const togglePhotoSelection = useCallback((id: string) => {
-    setPhotos(prev => {
-      const currentSelectedCount = prev.filter(p => p.selected).length;
-      return prev.map(item => {
-        if (item.id === id) {
-          if (item.status === 'uploaded') {
-            return item;
-          }
-          const nextSelected = !item.selected;
-          if (nextSelected && currentSelectedCount >= 20) {
-            Alert.alert(
-              'Selection Limit Reached',
-              'You can mark and upload a maximum of 20 photos at a time.',
-            );
-            return item;
-          }
-          return {
-            ...item,
-            selected: nextSelected,
-            status: nextSelected ? 'marked' : 'new',
-          };
-        }
-        return item;
-      });
+  const toggleFavoritePhoto = useCallback((id: string) => {
+    setFavoritePhotoIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
   }, []);
 
-  // Step 7: Toggle Select All photos within a specific batch (with 20-photo safety limit)
-  const toggleBatchSelection = useCallback((batch: RuntimeBatch) => {
-    setPhotos(prev => {
-      const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
-      if (selectablePhotos.length === 0) return prev;
-
-      const allSelected = selectablePhotos.every(p => {
-        const current = prev.find(item => item.id === p.id);
-        return current?.selected;
-      });
-
-      const batchPhotoIds = new Set(batch.photos.map(p => p.id));
-      const currentTotalSelected = prev.filter(p => p.selected).length;
-      const unselectedInBatch = selectablePhotos.filter(p => {
-        const current = prev.find(item => item.id === p.id);
-        return !current?.selected;
-      });
-
-      if (!allSelected && currentTotalSelected + unselectedInBatch.length > 20) {
-        Alert.alert(
-          'Selection Limit Reached',
-          'You can mark and upload a maximum of 20 photos at a time.',
-        );
-        return prev;
+  // Toggle Photo Selection (unrestricted selection count)
+  const togglePhotoSelection = useCallback(
+    (id: string) => {
+      const targetPhoto = photos.find(p => p.id === id);
+      if (targetPhoto && targetPhoto.status === 'uploaded') {
+        return; // Uploaded photos cannot be selected for upload
       }
 
-      return prev.map(item => {
-        if (batchPhotoIds.has(item.id) && item.status !== 'uploaded') {
-          const nextSelected = !allSelected;
-          return {
-            ...item,
-            selected: nextSelected,
-            status: nextSelected ? 'marked' : item.status === 'marked' ? 'new' : item.status,
-          };
+      setSelectedPhotoIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
         }
-        return item;
+        return next;
       });
+    },
+    [photos],
+  );
+
+  // Toggle Select All photos within a specific batch (unrestricted selection count)
+  const toggleBatchSelection = useCallback((batch: RuntimeBatch) => {
+    setSelectedPhotoIds(prev => {
+      const selectableIds = batch.photos.filter(p => p.status !== 'uploaded').map(p => p.id);
+      if (selectableIds.length === 0) return prev;
+
+      const allSelected = selectableIds.every(id => prev.has(id));
+      const next = new Set(prev);
+      selectableIds.forEach(id => {
+        if (allSelected) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+      });
+      return next;
     });
   }, []);
 
@@ -286,82 +323,58 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setIsActionsModalVisible(true);
   }, []);
 
-  // Select All Photos (Capped at 20)
+  // Select All Photos (unrestricted selection count)
   const handleSelectAll = useCallback(() => {
-    let count = 0;
-    setPhotos(prev =>
-      prev.map(p => {
-        if (p.status !== 'uploaded' && count < 20) {
-          count++;
-          return { ...p, selected: true, status: 'marked' };
+    setSelectedPhotoIds(prev => {
+      const next = new Set(prev);
+      photos.forEach(p => {
+        if (p.status !== 'uploaded') {
+          next.add(p.id);
         }
-        return p;
-      }),
-    );
+      });
+      return next;
+    });
     setIsActionsModalVisible(false);
-    if (photos.filter(p => p.status !== 'uploaded').length > 20) {
-      Alert.alert('Limit Applied', 'Selected the first 20 photos (maximum batch size).');
-    }
   }, [photos]);
 
-  // Select All New Photos (Capped at 20)
+  // Select All New Photos (unrestricted selection count)
   const handleSelectAllNew = useCallback(() => {
-    let count = 0;
-    setPhotos(prev =>
-      prev.map(p => {
-        if (p.status === 'new' && count < 20) {
-          count++;
-          return { ...p, selected: true, status: 'marked' };
+    setSelectedPhotoIds(prev => {
+      const next = new Set(prev);
+      photos.forEach(p => {
+        if (p.status === 'new') {
+          next.add(p.id);
         }
-        return p;
-      }),
-    );
+      });
+      return next;
+    });
     setIsActionsModalVisible(false);
-    if (photos.filter(p => p.status === 'new').length > 20) {
-      Alert.alert('Limit Applied', 'Selected the first 20 new photos (maximum batch size).');
-    }
   }, [photos]);
 
-  // Invert Selection (Capped at 20)
+  // Invert Selection (unrestricted selection count)
   const handleInvertSelection = useCallback(() => {
-    let count = 0;
-    setPhotos(prev =>
-      prev.map(p => {
-        if (p.status === 'uploaded') return p;
-        const nextSelected = !p.selected;
-        if (nextSelected && count < 20) {
-          count++;
-          return {
-            ...p,
-            selected: true,
-            status: 'marked',
-          };
+    setSelectedPhotoIds(prev => {
+      const next = new Set<string>();
+      photos.forEach(p => {
+        if (p.status === 'uploaded') return;
+        if (!prev.has(p.id)) {
+          next.add(p.id);
         }
-        return {
-          ...p,
-          selected: false,
-          status: p.status === 'marked' ? 'new' : p.status,
-        };
-      }),
-    );
+      });
+      return next;
+    });
     setIsActionsModalVisible(false);
-  }, []);
+  }, [photos]);
 
   // Clear Selection
   const handleClearSelection = useCallback(() => {
-    setPhotos(prev =>
-      prev.map(p => ({
-        ...p,
-        selected: false,
-        status: p.status === 'marked' ? 'new' : p.status,
-      })),
-    );
+    setSelectedPhotoIds(new Set());
     setIsActionsModalVisible(false);
   }, []);
 
   // Batch Delete Selected Photos
   const handleDeleteSelectedPhotos = useCallback(() => {
-    const selectedPhotos = photos.filter(p => p.selected);
+    const selectedPhotos = photos.filter(p => selectedPhotoIds.has(p.id));
     if (selectedPhotos.length === 0) {
       Alert.alert('No Photos Selected', 'Please select one or more photos to delete.');
       return;
@@ -390,6 +403,18 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 }
               }),
             );
+
+            // Clear deleted IDs from selection and favorite sets
+            setSelectedPhotoIds(prev => {
+              const next = new Set(prev);
+              selectedIds.forEach(id => next.delete(id));
+              return next;
+            });
+            setFavoritePhotoIds(prev => {
+              const next = new Set(prev);
+              selectedIds.forEach(id => next.delete(id));
+              return next;
+            });
 
             // Update state
             setPhotos(prev => prev.filter(p => !selectedIds.has(p.id) && !selectedUris.has(p.uri)));
@@ -435,7 +460,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
-    const batchToUpload = selectedPhotos.slice(0, 20);
+    const batchToUpload = selectedPhotos;
 
     Alert.alert(
       'Upload Photos',
@@ -589,6 +614,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           item={item}
           uploadingPhotoIds={uploadingPhotoIds}
           selectedPhotoIds={selectedPhotoIds}
+          favoritePhotoIds={favoritePhotoIds}
           onOpenViewer={flatIndex => {
             setViewerInitialIndex(flatIndex);
             setViewerVisible(true);
@@ -597,7 +623,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         />
       );
     },
-    [uploadingPhotoIds, selectedPhotoIds, togglePhotoSelection],
+    [uploadingPhotoIds, selectedPhotoIds, favoritePhotoIds, togglePhotoSelection],
   );
 
   return (
@@ -677,7 +703,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             contentContainerStyle={styles.filterScrollContent}
             data={[
               { key: 'All' as FilterTab, label: `All (${totalCount})` },
-              { key: 'New' as FilterTab, label: `New (${newCount})` },
+              { key: 'Favorites' as FilterTab, label: `Favorites (${favoriteCount})` },
               { key: 'Marked' as FilterTab, label: `Marked (${markedCount})` },
               { key: 'Uploaded' as FilterTab, label: `Uploaded (${uploadedCount})` },
             ]}
@@ -739,7 +765,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         {/* ── 3. PHOTO GRID (SectionList, one section per PhotoBatch) ── */}
         <SectionList<GallerySectionRow, GalleryBatchSection>
           sections={gallerySections}
-          extraData={selectedPhotoIds}
+          extraData={useMemo(
+            () => [selectedPhotoIds, favoritePhotoIds],
+            [selectedPhotoIds, favoritePhotoIds],
+          )}
           keyExtractor={item => item.rowKey}
           renderItem={renderSectionItem}
           renderSectionHeader={renderSectionHeader}
@@ -753,54 +782,81 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           windowSize={5} // 5 screens of content (default is 21), reduces memory usage for heavy images
           removeClippedSubviews={true}
           stickySectionHeadersEnabled={false}
-          ListEmptyComponent={() => (
-            <View style={styles.emptyContainer}>
-              <View
-                style={[
-                  styles.emptyIconCircle,
-                  {
-                    backgroundColor: isDark ? '#26262E' : '#FFE5D9',
-                    borderColor: isDark ? '#3F3F46' : '#161616',
-                  },
-                ]}
-              >
-                <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
-              </View>
-              <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
-              </Text>
-              <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-                Connect your camera or copy photo files into {'\n'}
-                <Text style={{ fontWeight: '700', color: isDark ? '#F4F4F5' : '#161616' }}>
-                  {CANONICAL_DCIM_DIR_URI}
-                </Text>
-              </Text>
-              <TouchableOpacity
-                activeOpacity={0.8}
-                onPress={handleManualRescan}
-                disabled={isRefreshing}
-                style={[
-                  styles.emptyRefreshBtn,
-                  {
-                    backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                    borderColor: isDark ? '#2E2E36' : '#161616',
-                  },
-                ]}
-              >
-                <RefreshCw
-                  size={16}
-                  color={isDark ? '#F4F4F5' : '#161616'}
-                  strokeWidth={2.2}
-                  style={{ marginRight: 8 }}
-                />
-                <Text
-                  style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+          ListEmptyComponent={() => {
+            if (activeFilter === 'Favorites') {
+              return (
+                <View style={styles.emptyContainer}>
+                  <View
+                    style={[
+                      styles.emptyIconCircle,
+                      {
+                        backgroundColor: isDark ? '#2E221D' : '#FFE5D9',
+                        borderColor: isDark ? '#3E2F28' : '#161616',
+                      },
+                    ]}
+                  >
+                    <Heart size={34} color="#FF4D4D" fill="#FF4D4D" strokeWidth={0} />
+                  </View>
+                  <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    No Favorite Photos
+                  </Text>
+                  <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                    Tap the heart icon on any photo in the viewer {'\n'} to add it to your
+                    favorites.
+                  </Text>
+                </View>
+              );
+            }
+
+            return (
+              <View style={styles.emptyContainer}>
+                <View
+                  style={[
+                    styles.emptyIconCircle,
+                    {
+                      backgroundColor: isDark ? '#26262E' : '#FFE5D9',
+                      borderColor: isDark ? '#3F3F46' : '#161616',
+                    },
+                  ]}
                 >
-                  {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
+                  <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
+                </View>
+                <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                  {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
                 </Text>
-              </TouchableOpacity>
-            </View>
-          )}
+                <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Connect your camera or copy photo files into {'\n'}
+                  <Text style={{ fontWeight: '700', color: isDark ? '#F4F4F5' : '#161616' }}>
+                    {CANONICAL_DCIM_DIR_URI}
+                  </Text>
+                </Text>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={handleManualRescan}
+                  disabled={isRefreshing}
+                  style={[
+                    styles.emptyRefreshBtn,
+                    {
+                      backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
+                      borderColor: isDark ? '#2E2E36' : '#161616',
+                    },
+                  ]}
+                >
+                  <RefreshCw
+                    size={16}
+                    color={isDark ? '#F4F4F5' : '#161616'}
+                    strokeWidth={2.2}
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text
+                    style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                  >
+                    {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            );
+          }}
         />
 
         {/* ── 4. FLOATING BOTTOM ACTION DOCK ── */}
@@ -903,6 +959,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           eventSubtitle={`${eventCategory} • ${eventDateFormatted}`}
           onClose={() => setViewerVisible(false)}
           onToggleMark={togglePhotoSelection}
+          onToggleFavorite={toggleFavoritePhoto}
+          favoritePhotoIds={favoritePhotoIds}
           onUploadPhoto={handleUploadSinglePhoto}
           onDeletePhoto={handleDeletePhoto}
           isDark={isDark}
@@ -937,6 +995,7 @@ const MemoizedPhotoTile = React.memo(
     flatIndex,
     isUploading,
     isSelected,
+    isFavorite,
     onOpenViewer,
     onToggleSelection,
   }: {
@@ -944,6 +1003,7 @@ const MemoizedPhotoTile = React.memo(
     flatIndex: number;
     isUploading: boolean;
     isSelected: boolean;
+    isFavorite: boolean;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
@@ -972,6 +1032,12 @@ const MemoizedPhotoTile = React.memo(
             resizeMode="cover"
           />
 
+          {isFavorite && (
+            <View style={styles.favoriteBadgeContainer}>
+              <Heart size={16} color="#FFFFFF" fill="#FF4D4D" strokeWidth={1.8} />
+            </View>
+          )}
+
           {item.isRaw && (
             <View style={styles.rawBadgeContainer}>
               <Text style={styles.rawBadgeText}>RAW</Text>
@@ -981,12 +1047,12 @@ const MemoizedPhotoTile = React.memo(
           <Pressable
             onPress={e => {
               e.stopPropagation();
-              if (!isUploading) {
+              if (!isUploading && !isUploaded) {
                 onToggleSelection(item.id);
               }
             }}
             hitSlop={10}
-            disabled={isUploading}
+            disabled={isUploading || isUploaded}
             style={styles.selectionIndicatorContainer}
             accessibilityRole="checkbox"
             accessibilityState={{ checked: isSelected }}
@@ -1019,6 +1085,7 @@ const MemoizedPhotoTile = React.memo(
       prevProps.item === nextProps.item &&
       prevProps.isUploading === nextProps.isUploading &&
       prevProps.isSelected === nextProps.isSelected &&
+      prevProps.isFavorite === nextProps.isFavorite &&
       prevProps.flatIndex === nextProps.flatIndex
     );
   },
@@ -1029,12 +1096,14 @@ const MemoizedGridRow = React.memo(
     item,
     uploadingPhotoIds,
     selectedPhotoIds,
+    favoritePhotoIds,
     onOpenViewer,
     onToggleSelection,
   }: {
     item: Extract<GallerySectionRow, { type: 'grid_row' }>;
     uploadingPhotoIds: Set<string>;
     selectedPhotoIds: Set<string>;
+    favoritePhotoIds: Set<string>;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
@@ -1047,6 +1116,7 @@ const MemoizedGridRow = React.memo(
             flatIndex={photoIndex}
             isUploading={uploadingPhotoIds.has(photo.id)}
             isSelected={selectedPhotoIds.has(photo.id)}
+            isFavorite={favoritePhotoIds.has(photo.id)}
             onOpenViewer={onOpenViewer}
             onToggleSelection={onToggleSelection}
           />
@@ -1066,14 +1136,19 @@ const MemoizedGridRow = React.memo(
       if (prev.item.photos[i].photoIndex !== next.item.photos[i].photoIndex) return false;
     }
 
-    // Check if uploading state changed specifically for photos in THIS row
+    // Check if uploading, selection, or favorite state changed specifically for photos in THIS row
     for (const { photo } of prev.item.photos) {
       const wasUploading = prev.uploadingPhotoIds.has(photo.id);
       const isUploading = next.uploadingPhotoIds.has(photo.id);
       if (wasUploading !== isUploading) return false;
+
       const wasSelected = prev.selectedPhotoIds.has(photo.id);
       const isSelected = next.selectedPhotoIds.has(photo.id);
       if (wasSelected !== isSelected) return false;
+
+      const wasFavorite = prev.favoritePhotoIds.has(photo.id);
+      const isFavorite = next.favoritePhotoIds.has(photo.id);
+      if (wasFavorite !== isFavorite) return false;
     }
 
     return true;
@@ -1462,6 +1537,23 @@ const styles = StyleSheet.create({
   photoImage: {
     width: '100%',
     height: '100%',
+  },
+  favoriteBadgeContainer: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    zIndex: 3,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.6,
+        shadowRadius: 2,
+      },
+      android: {
+        elevation: 3,
+      },
+    }),
   },
   rawBadgeContainer: {
     position: 'absolute',

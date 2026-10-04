@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 const TOKEN_KEY = 'entephoto_session_token';
 const REFRESH_TOKEN_KEY = 'entephoto_refresh_token';
 const USER_KEY = 'entephoto_user_data';
+const FAVORITES_KEY = 'entephoto_favorite_photo_ids_v1';
 
 export const storageService = {
   async getSessionToken(): Promise<string | null> {
@@ -98,6 +99,29 @@ export const storageService = {
       console.log('[storageService] Cleared all stored credentials from SecureStore');
     } catch (error) {
       console.error('[storageService] Error in clearAll:', error);
+    }
+  },
+
+  async getFavoritePhotoIds(): Promise<string[]> {
+    try {
+      const data = await SecureStore.getItemAsync(FAVORITES_KEY);
+      if (!data) return [];
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+        return parsed;
+      }
+      return [];
+    } catch (error) {
+      console.error('[storageService] Failed to get favorite photo IDs:', error);
+      return [];
+    }
+  },
+
+  async setFavoritePhotoIds(ids: string[]): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(FAVORITES_KEY, JSON.stringify(ids));
+    } catch (error) {
+      console.error('[storageService] Failed to save favorite photo IDs:', error);
     }
   },
 };
