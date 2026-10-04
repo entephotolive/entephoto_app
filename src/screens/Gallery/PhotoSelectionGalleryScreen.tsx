@@ -10,6 +10,8 @@ import {
   Platform,
   ActivityIndicator,
   Animated,
+  Image,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -19,9 +21,9 @@ import {
   ArrowRight,
   MoreVertical,
   Cloud,
-  Camera,
   RefreshCw,
   Heart,
+  Info,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -34,8 +36,6 @@ import {
   scanDcimEntephotoPhotos,
   subscribeToDcimPhotos,
   deleteLocalPhoto,
-  CANONICAL_DCIM_DIR_URI,
-  PHOTO_STORAGE_DISPLAY_PATH,
 } from '@/services/localPhotoService';
 import { uploadSinglePhoto, isValidObjectId } from '@/services/photoUploadService';
 import { storageService } from '@/services/storageService';
@@ -76,6 +76,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const route = useRoute<RouteProp<AppStackParamList, 'PhotoSelectionGallery'>>();
   const { isDark } = useTheme();
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
 
   // Route Parameters
   const eventId = route.params?.eventId || '';
@@ -870,13 +871,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           renderSectionHeader={renderSectionHeader}
           contentContainerStyle={[
             styles.gridContentContainer,
-            { paddingBottom: insets.bottom + 120 },
+            { paddingBottom: gallerySections.length === 0 ? 0 : insets.bottom + 120 },
           ]}
           showsVerticalScrollIndicator={false}
           initialNumToRender={10} // 10 rows = 30 photos, easily fills any phone screen without huge initial blocking
           maxToRenderPerBatch={10}
           windowSize={5} // 5 screens of content (default is 21), reduces memory usage for heavy images
           removeClippedSubviews={true}
+          scrollEnabled={gallerySections.length > 0}
           stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => {
             if (activeFilter === 'Favorites') {
@@ -905,27 +907,77 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             }
 
             return (
-              <View style={styles.emptyContainer}>
+              <View
+                style={[
+                  styles.emptyContainer,
+                  {
+                    paddingBottom: Math.max(insets.bottom, 20),
+                  },
+                ]}
+              >
+                {/* Illustration */}
                 <View
                   style={[
-                    styles.emptyIconCircle,
+                    styles.emptyIllustrationContainer,
                     {
-                      backgroundColor: isDark ? '#26262E' : '#FFE5D9',
-                      borderColor: isDark ? '#3F3F46' : '#161616',
+                      height: Math.min(windowHeight * 0.28, 220),
+                      width: Math.min(windowHeight * 0.28, 220),
                     },
                   ]}
                 >
-                  <Camera size={34} color={isDark ? '#FFA07A' : '#161616'} strokeWidth={2} />
+                  <Image
+                    source={require('../../../assets/galleryScreen/clay_folder_illustration.jpg')}
+                    style={styles.emptyIllustration}
+                    resizeMode="contain"
+                  />
                 </View>
-                <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                  {`No photos in ${PHOTO_STORAGE_DISPLAY_PATH}`}
+
+                {/* Main Message */}
+                <Text style={[styles.emptyTitle, { color: isDark ? '#F4F4F5' : '#1A1A1E' }]}>
+                  No photos found
                 </Text>
                 <Text style={[styles.emptySubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-                  Connect your camera or copy photo files into {'\n'}
-                  <Text style={{ fontWeight: '700', color: isDark ? '#F4F4F5' : '#161616' }}>
-                    {CANONICAL_DCIM_DIR_URI}
-                  </Text>
+                  We couldn&apos;t find any photos in this folder.
                 </Text>
+
+                {/* Helpful Information Card */}
+                <View
+                  style={[
+                    styles.emptyInfoCard,
+                    {
+                      backgroundColor: isDark ? '#1F1F24' : '#FFF0E6',
+                      borderColor: isDark ? 'rgba(255,255,255,0.04)' : '#FFE3D4',
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.emptyInfoIconWrapper,
+                      { backgroundColor: isDark ? '#332924' : '#FFD9C6' },
+                    ]}
+                  >
+                    <Info size={22} color={isDark ? '#FFA07A' : '#D97757'} strokeWidth={2.5} />
+                  </View>
+                  <View style={styles.emptyInfoTextGroup}>
+                    <Text
+                      style={[
+                        styles.emptyInfoText,
+                        {
+                          color: isDark ? '#E4E4E5' : '#2D2825',
+                          fontFamily: FONTS.plusJakartaSans.bold,
+                          marginBottom: 2,
+                        },
+                      ]}
+                    >
+                      Make sure your camera is connected
+                    </Text>
+                    <Text style={[styles.emptyInfoText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                      and photos are saved to folder.
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Primary Action Button */}
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={handleManualRescan}
@@ -933,22 +985,25 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                   style={[
                     styles.emptyRefreshBtn,
                     {
-                      backgroundColor: isDark ? '#1A1A1E' : '#FFFFFF',
-                      borderColor: isDark ? '#2E2E36' : '#161616',
+                      backgroundColor: isDark ? '#26262E' : '#1A1A1E',
                     },
                   ]}
                 >
                   <RefreshCw
-                    size={16}
-                    color={isDark ? '#F4F4F5' : '#161616'}
+                    size={20}
+                    color="#FFFFFF"
                     strokeWidth={2.2}
-                    style={{ marginRight: 8 }}
+                    style={{ marginRight: 12 }}
                   />
-                  <Text
-                    style={[styles.emptyRefreshBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
-                  >
-                    {isRefreshing ? 'Scanning...' : 'Rescan Photo Folder'}
+                  <Text style={styles.emptyRefreshBtnText}>
+                    {isRefreshing ? 'Scanning...' : 'Rescan Photos'}
                   </Text>
+                  <ArrowRight
+                    size={20}
+                    color="#FFFFFF"
+                    strokeWidth={2.2}
+                    style={{ marginLeft: 12 }}
+                  />
                 </TouchableOpacity>
               </View>
             );
@@ -2050,9 +2105,10 @@ const styles = StyleSheet.create({
 
   // ── Empty State Styles ──
   emptyContainer: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    paddingVertical: 24,
     paddingHorizontal: 24,
   },
   emptyIconCircle: {
@@ -2064,43 +2120,103 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 16,
   },
+  emptyIllustrationContainer: {
+    marginBottom: 16,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#D97757',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.15,
+        shadowRadius: 20,
+      },
+      android: {
+        elevation: 6,
+      },
+    }),
+  },
+  emptyIllustration: {
+    width: '100%',
+    height: '100%',
+  },
   emptyTitle: {
     fontFamily: FONTS.syne.bold,
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 8,
+    fontSize: 26,
+    lineHeight: 32,
+    fontWeight: '700',
+    marginBottom: 6,
     textAlign: 'center',
+    letterSpacing: -0.4,
   },
   emptySubtitle: {
     fontFamily: FONTS.plusJakartaSans.medium,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '500',
     textAlign: 'center',
     marginBottom: 20,
   },
-  emptyRefreshBtn: {
+  emptyInfoCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 24,
-    borderWidth: 2,
+    padding: 16,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginBottom: 20,
+    width: '100%',
     ...Platform.select({
       ios: {
-        shadowColor: '#161616',
-        shadowOffset: { width: 2, height: 2 },
-        shadowOpacity: 0.8,
-        shadowRadius: 0,
+        shadowColor: '#D97757',
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.08,
+        shadowRadius: 14,
       },
       android: {
         elevation: 2,
       },
     }),
   },
+  emptyInfoIconWrapper: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 16,
+  },
+  emptyInfoTextGroup: {
+    flex: 1,
+  },
+  emptyInfoText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  emptyRefreshBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 18,
+    borderRadius: 32,
+    width: '100%',
+    marginBottom: 0,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#1A1A1E',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.2,
+        shadowRadius: 16,
+      },
+      android: {
+        elevation: 6,
+      },
+    }),
+  },
   emptyRefreshBtnText: {
     fontFamily: FONTS.syne.bold,
-    fontSize: 13.5,
-    fontWeight: '700',
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#FFFFFF',
   },
 
   // ── 4. Floating Bottom Action Dock Styles ──
