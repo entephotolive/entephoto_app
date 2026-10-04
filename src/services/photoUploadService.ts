@@ -73,6 +73,7 @@ export async function uploadSinglePhoto(
   eventId: string,
   photo: GalleryPhotoItem,
   folderId?: string | null,
+  onProgress?: (progress: number) => void,
 ): Promise<UploadPhotoResponse> {
   // 1. Validate eventId (24-char hex)
   if (!isValidObjectId(eventId)) {
@@ -175,19 +176,34 @@ export async function uploadSinglePhoto(
       ...(additionalParams.folder_id ? { folder_id: additionalParams.folder_id } : {}),
     });
 
-    // 6. Upload via FileSystem.uploadAsync — uses native HTTP multipart,
-    //    bypassing the Hermes JS FormData limitation that caused
-    //    "Unsupported FormDataPart implementation" errors.
+    // 6. Upload via FileSystem.createUploadTask to support byte-level progress
     let uploadResult: FileSystem.FileSystemUploadResult;
     try {
-      uploadResult = await FileSystem.uploadAsync(uploadUrl, finalUploadUri, {
-        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-        httpMethod: 'POST',
-        fieldName: 'images',
-        mimeType: finalMime,
-        parameters: additionalParams,
-        headers: { Accept: 'application/json' },
-      });
+      const uploadTask = FileSystem.createUploadTask(
+        uploadUrl,
+        finalUploadUri,
+        {
+          uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+          httpMethod: 'POST',
+          fieldName: 'images',
+          mimeType: finalMime,
+          parameters: additionalParams,
+          headers: { Accept: 'application/json' },
+        },
+        data => {
+          if (onProgress && data.totalBytesExpectedToSend > 0) {
+            const percentage = (data.totalBytesSent / data.totalBytesExpectedToSend) * 100;
+            // Never report 100% until the server actually responds successfully
+            onProgress(Math.min(99.9, Math.max(0, percentage)));
+          }
+        },
+      );
+
+      const result = await uploadTask.uploadAsync();
+      if (!result) {
+        throw new Error('Upload task returned null result.');
+      }
+      uploadResult = result;
     } catch (networkErr: any) {
       console.error(
         '[photoUploadService] uploadAsync network failure:',

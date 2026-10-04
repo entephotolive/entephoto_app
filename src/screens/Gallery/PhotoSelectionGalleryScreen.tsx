@@ -94,16 +94,22 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
 
   // Uploading state
+  const isUploadingRef = React.useRef(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     current: number;
     total: number;
     filename?: string;
+    bytePercentage?: number;
   } | null>(null);
   const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
   const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
   const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
+
+  // Floating Dock Animation & Favorite Logic
+  const [dockSlideAnim] = useState(() => new Animated.Value(0));
+  const [progressAnim] = useState(() => new Animated.Value(0));
 
   // Restore favorited photos from local storage on mount
   useEffect(() => {
@@ -436,15 +442,166 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     await handleManualRescan();
   }, [handleManualRescan]);
 
-  // Upload Selected Photos (Bulk upload: Each image uploaded independently)
+  // ── CORE UPLOAD BATCH HANDLER ──
+  // This single function owns the upload process to strictly prevent concurrent upload bugs.
+  const executeUploadBatch = useCallback(
+    async (batchToUpload: GalleryPhotoItem[], showConfirmation: boolean = true) => {
+      if (isUploadingRef.current) {
+        console.warn('[PhotoGallery] Upload already in progress. Ignoring request.');
+        return;
+      }
+
+      if (!eventId || !isValidObjectId(eventId)) {
+        Alert.alert(
+          'Invalid Event ID',
+          'No valid 24-character hex event ID is associated with this session.',
+        );
+        return;
+      }
+
+      if (batchToUpload.length === 0) {
+        Alert.alert('No Photos', 'No eligible photos to upload.');
+        return;
+      }
+
+      const runUploads = async () => {
+        // Double-check the lock inside the async callback (in case of double taps on the Alert)
+        if (isUploadingRef.current) return;
+
+        isUploadingRef.current = true;
+        setIsUploading(true);
+
+        const total = batchToUpload.length;
+        let successCount = 0;
+        let failCount = 0;
+        const failReasons: string[] = [];
+
+        console.log(`[PhotoGallery] Starting batch upload of ${total} photos.`);
+        setUploadProgress({ current: 0, total });
+
+        try {
+          for (let i = 0; i < total; i++) {
+            const photo = batchToUpload[i];
+            console.log(`[PhotoGallery] Uploading photo ${i + 1}/${total}: ${photo.filename}`);
+
+            // Reset progress line for the new photo
+            progressAnim.setValue(0);
+
+            setUploadProgress({
+              current: i + 1,
+              total,
+              filename: photo.filename,
+              bytePercentage: 0,
+            });
+            setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
+
+            try {
+              let lastStateUpdate = 0;
+              await uploadSinglePhoto(eventId, photo, null, percentage => {
+                // Smoothly animate the bar
+                Animated.timing(progressAnim, {
+                  toValue: percentage,
+                  duration: 200,
+                  useNativeDriver: false,
+                }).start();
+
+                // Throttle full React state updates to avoid unnecessary gallery re-renders
+                const now = Date.now();
+                if (now - lastStateUpdate > 250 || percentage >= 99.9) {
+                  lastStateUpdate = now;
+                  setUploadProgress(prev =>
+                    prev ? { ...prev, bytePercentage: percentage } : prev,
+                  );
+                }
+              });
+
+              // Ensure we show 100% when success is confirmed
+              progressAnim.setValue(100);
+              setUploadProgress(prev => (prev ? { ...prev, bytePercentage: 100 } : prev));
+
+              successCount++;
+              console.log(`[PhotoGallery] Photo ${photo.filename} uploaded successfully.`);
+
+              // Mark individual photo as uploaded immediately upon success
+              setPhotos(prev =>
+                prev.map(p =>
+                  p.id === photo.id || p.uri === photo.uri
+                    ? { ...p, selected: false, status: 'uploaded' }
+                    : p,
+                ),
+              );
+              setSelectedPhotoIds(prev => {
+                const next = new Set(prev);
+                next.delete(photo.id);
+                return next;
+              });
+            } catch (err: any) {
+              const errorMsg = err?.message || 'Upload failed';
+              console.error(`[PhotoGallery] Upload error for ${photo.filename}:`, errorMsg);
+              failReasons.push(`${photo.filename}: ${errorMsg}`);
+              failCount++;
+            } finally {
+              setUploadingPhotoIds(prev => {
+                const next = new Set(prev);
+                next.delete(photo.id);
+                return next;
+              });
+            }
+          }
+        } finally {
+          // ALWAYS release the lock
+          isUploadingRef.current = false;
+          setIsUploading(false);
+          setUploadProgress(null);
+          console.log(
+            `[PhotoGallery] Batch complete. Success: ${successCount}, Failed: ${failCount}`,
+          );
+
+          if (failCount === 0) {
+            Alert.alert(
+              'Upload Complete! 🚀',
+              `Successfully uploaded ${successCount} photo${successCount !== 1 ? 's' : ''} to "${eventTitle}".`,
+            );
+          } else {
+            const reasonsSample = failReasons.slice(0, 3).join('\n• ');
+            const moreText =
+              failReasons.length > 3 ? `\n...and ${failReasons.length - 3} more.` : '';
+            Alert.alert(
+              'Upload Finished ⚠️',
+              `Uploaded: ${successCount}\nFailed: ${failCount}\n\nIssues:\n• ${reasonsSample}${moreText}\n\nYou can retry uploading any remaining marked photos.`,
+            );
+          }
+        }
+      };
+
+      if (showConfirmation) {
+        Alert.alert(
+          'Upload Photos',
+          `Ready to upload ${batchToUpload.length} selected photo${batchToUpload.length > 1 ? 's' : ''} to "${eventTitle}"? Each photo is processed independently.`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: `Upload (${batchToUpload.length})`,
+              style: 'default',
+              onPress: runUploads,
+            },
+          ],
+        );
+      } else {
+        await runUploads();
+      }
+    },
+    [eventId, eventTitle, progressAnim],
+  );
+
+  // Upload Selected Photos (Gallery Bulk Upload)
   const handleUploadPhotos = useCallback(() => {
-    if (isUploading) {
-      return;
-    }
+    if (isUploadingRef.current) return;
 
     const selectedPhotos = photos.filter(
       p => selectedPhotoIds.has(p.id) && p.status !== 'uploaded',
     );
+
     if (selectedPhotos.length === 0) {
       Alert.alert(
         'No Photos Selected',
@@ -453,89 +610,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
-    if (!eventId || !isValidObjectId(eventId)) {
-      Alert.alert(
-        'Invalid Event ID',
-        'No valid 24-character hex event ID is associated with this session. Please select a valid event first.',
-      );
-      return;
-    }
-
-    const batchToUpload = selectedPhotos;
-
-    Alert.alert(
-      'Upload Photos',
-      `Ready to upload ${batchToUpload.length} selected photo${batchToUpload.length > 1 ? 's' : ''} to "${eventTitle}"? Each photo is processed independently.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: `Upload (${batchToUpload.length})`,
-          style: 'default',
-          onPress: async () => {
-            setIsUploading(true);
-            const total = batchToUpload.length;
-            let successCount = 0;
-            let failCount = 0;
-            const failReasons: string[] = [];
-
-            setUploadProgress({ current: 0, total });
-
-            for (let i = 0; i < total; i++) {
-              const photo = batchToUpload[i];
-              setUploadProgress({
-                current: i + 1,
-                total,
-                filename: photo.filename,
-              });
-              setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
-
-              try {
-                await uploadSinglePhoto(eventId, photo);
-                successCount++;
-                // Mark individual photo as uploaded immediately upon success
-                setPhotos(prev =>
-                  prev.map(p =>
-                    p.id === photo.id || p.uri === photo.uri
-                      ? { ...p, selected: false, status: 'uploaded' }
-                      : p,
-                  ),
-                );
-              } catch (err: any) {
-                const errorMsg = err?.message || 'Upload failed';
-                console.error(`[PhotoGallery] Upload error for ${photo.filename}:`, errorMsg);
-                failReasons.push(`${photo.filename}: ${errorMsg}`);
-                failCount++;
-              } finally {
-                setUploadingPhotoIds(prev => {
-                  const next = new Set(prev);
-                  next.delete(photo.id);
-                  return next;
-                });
-              }
-            }
-
-            setIsUploading(false);
-            setUploadProgress(null);
-
-            if (failCount === 0) {
-              Alert.alert(
-                'Upload Complete! 🚀',
-                `Successfully uploaded all ${successCount} photos to "${eventTitle}".`,
-              );
-            } else {
-              const reasonsSample = failReasons.slice(0, 3).join('\n• ');
-              const moreText =
-                failReasons.length > 3 ? `\n...and ${failReasons.length - 3} more.` : '';
-              Alert.alert(
-                'Upload Finished ⚠️',
-                `Uploaded: ${successCount}\nFailed: ${failCount}\n\nIssues:\n• ${reasonsSample}${moreText}\n\nYou can retry uploading any remaining marked photos.`,
-              );
-            }
-          },
-        },
-      ],
-    );
-  }, [isUploading, photos, eventId, eventTitle]);
+    executeUploadBatch(selectedPhotos, true);
+  }, [photos, selectedPhotoIds, executeUploadBatch]);
 
   // Upload Trigger from Action Sheet
   const handleUploadFromSheet = useCallback(() => {
@@ -549,49 +625,20 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setPhotos(prev => prev.filter(p => p.id !== photo.id && p.uri !== photo.uri));
   }, []);
 
-  // Upload Single Photo
+  // Upload Single Photo (Thin wrapper for the viewer)
   const handleUploadSinglePhoto = useCallback(
-    async (photo: GalleryPhotoItem) => {
-      if (!eventId || !isValidObjectId(eventId)) {
-        Alert.alert('Invalid Event ID', 'No valid 24-character event ID available for upload.');
-        return;
-      }
-      setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
-      try {
-        await uploadSinglePhoto(eventId, photo);
-        setPhotos(prev =>
-          prev.map(p =>
-            p.id === photo.id || p.uri === photo.uri
-              ? { ...p, selected: false, status: 'uploaded' }
-              : p,
-          ),
-        );
-        Alert.alert(
-          'Photo Uploaded! 🚀',
-          `${photo.filename || 'Photo'} has been uploaded to "${eventTitle}".`,
-        );
-      } catch (err: any) {
-        console.error(`[PhotoGallery] Failed to upload ${photo.filename}:`, err);
-        Alert.alert(
-          'Upload Failed',
-          `Could not upload ${photo.filename || 'photo'}:\n${err?.message || 'Network error'}`,
-        );
-      } finally {
-        setUploadingPhotoIds(prev => {
-          const next = new Set(prev);
-          next.delete(photo.id);
-          return next;
-        });
-      }
+    (photo: GalleryPhotoItem) => {
+      if (photo.status === 'uploaded') return;
+      // Do not show an alert prompt when uploading a single photo directly from the viewer
+      executeUploadBatch([photo], false);
     },
-    [eventId, eventTitle],
+    [executeUploadBatch],
   );
 
   // Floating Dock Animation & Favorite Logic
-  const [dockSlideAnim] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
-    if (selectedCount > 0) {
+    if (selectedCount > 0 || isUploading) {
       Animated.spring(dockSlideAnim, {
         toValue: 1,
         useNativeDriver: true,
@@ -605,7 +652,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         useNativeDriver: true,
       }).start();
     }
-  }, [selectedCount, dockSlideAnim]);
+  }, [selectedCount, isUploading, dockSlideAnim]);
+
+  useEffect(() => {
+    if (!isUploading) {
+      progressAnim.stopAnimation();
+      progressAnim.setValue(0);
+    }
+  }, [isUploading, progressAnim]);
 
   const selectedAreAllFavorites = useMemo(() => {
     if (selectedPhotoIds.size === 0) return false;
@@ -920,137 +974,198 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               ],
             },
           ]}
-          pointerEvents={selectedCount > 0 ? 'box-none' : 'none'}
+          pointerEvents={selectedCount > 0 || isUploading ? 'box-none' : 'none'}
         >
           <View
             style={[
               styles.floatingDockSurface,
               {
-                backgroundColor: isDark ? '#1C1C21' : '#FFFFFF',
-                borderColor: isDark ? '#2E2E36' : '#E8E8E8',
+                backgroundColor: isDark ? '#222228' : '#FFFFFF',
+                borderColor: isDark ? '#3A3A44' : '#E8E8E8',
               },
             ]}
           >
-            {/* Left Info: Icon Tile + Selected Counts */}
-            <View style={styles.dockLeftSection}>
-              <View style={styles.dockThumbnailStackContainer}>
-                <View
-                  style={[
-                    styles.dockThumbnailUnderlay2,
-                    { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
-                  ]}
-                />
-                <View
-                  style={[
-                    styles.dockThumbnailUnderlay1,
-                    { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
-                  ]}
-                />
-                <View
-                  style={[
-                    styles.dockThumbnailTop,
-                    {
-                      borderColor: isDark ? '#1C1C21' : '#FFFFFF',
-                      backgroundColor: isDark ? '#26262E' : '#F4F4F5',
-                    },
-                  ]}
-                >
-                  <Images size={18} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={1.5} />
-                  {selectedCount > 0 &&
-                    Array.from(selectedPhotoIds)
-                      .slice(0, 1)
-                      .map(id => {
-                        const photo = photos.find(p => p.id === id);
-                        if (photo) {
-                          return (
-                            <ImageWithSkeleton
-                              key={photo.id}
-                              source={{ uri: photo.uri }}
-                              style={styles.dockThumbnailImage}
-                              resizeMode="cover"
-                            />
-                          );
-                        }
-                        return null;
-                      })}
+            {isUploading ? (
+              <View style={styles.dockUploadStateContainer}>
+                {/* Top Row */}
+                <View style={styles.dockUploadTopRow}>
+                  <View style={styles.dockUploadTopLeft}>
+                    <Cloud size={18} color="#6366F1" strokeWidth={2.2} />
+                    <Text
+                      style={[styles.dockProgressTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                    >
+                      Uploading photos
+                    </Text>
+                  </View>
+                  <Text style={[styles.dockProgressTitle, { color: '#6366F1' }]}>
+                    {uploadProgress?.current || 1} / {uploadProgress?.total || 0} photos
+                  </Text>
+                </View>
+
+                {/* Bottom Row */}
+                <View style={styles.dockUploadBottomRow}>
+                  <View
+                    style={[
+                      styles.dockProgressBarTrack,
+                      {
+                        flex: 1,
+                        backgroundColor: isDark ? '#1C1C21' : '#EAEAEA',
+                        borderColor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)',
+                        borderWidth: 1,
+                      },
+                    ]}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.dockProgressBarFill,
+                        {
+                          backgroundColor: '#6366F1',
+                          width: progressAnim.interpolate({
+                            inputRange: [0, 100],
+                            outputRange: ['0%', '100%'],
+                          }),
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text
+                    numberOfLines={1}
+                    style={[
+                      styles.dockProgressCount,
+                      {
+                        color: isDark ? '#A1A1AA' : '#71717A',
+                        minWidth: 38,
+                        flexShrink: 0,
+                        textAlign: 'right',
+                      },
+                    ]}
+                  >
+                    {Math.round(uploadProgress?.bytePercentage || 0)}%
+                  </Text>
                 </View>
               </View>
+            ) : (
+              <View style={styles.dockNormalStateContainer}>
+                {/* Left Info: Icon Tile + Selected Counts */}
+                <View style={styles.dockLeftSection}>
+                  <View style={styles.dockThumbnailStackContainer}>
+                    <View
+                      style={[
+                        styles.dockThumbnailUnderlay2,
+                        { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        styles.dockThumbnailUnderlay1,
+                        { borderColor: isDark ? '#1C1C21' : '#FFFFFF' },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        styles.dockThumbnailTop,
+                        {
+                          borderColor: isDark ? '#1C1C21' : '#FFFFFF',
+                          backgroundColor: isDark ? '#26262E' : '#F4F4F5',
+                        },
+                      ]}
+                    >
+                      <Images size={18} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={1.5} />
+                      {selectedCount > 0 &&
+                        Array.from(selectedPhotoIds)
+                          .slice(0, 1)
+                          .map(id => {
+                            const photo = photos.find(p => p.id === id);
+                            if (photo) {
+                              return (
+                                <ImageWithSkeleton
+                                  key={photo.id}
+                                  source={{ uri: photo.uri }}
+                                  style={styles.dockThumbnailImage}
+                                  resizeMode="cover"
+                                />
+                              );
+                            }
+                            return null;
+                          })}
+                    </View>
+                  </View>
 
-              <View style={styles.dockTextStack}>
-                <Text
-                  style={[styles.dockSelectedCountText, { color: isDark ? '#F4F4F5' : '#161616' }]}
-                >
-                  {selectedCount} selected
-                </Text>
-                <Text style={[styles.dockSecondaryText, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
-                  Ready to upload
-                </Text>
-              </View>
-            </View>
-
-            <View
-              style={[
-                styles.dockVerticalDivider,
-                { backgroundColor: isDark ? '#2E2E36' : '#E4E4E8' },
-              ]}
-            />
-
-            {/* Right Action: Action Buttons */}
-            <View style={styles.dockRightSection}>
-              {/* Favorite Button */}
-              <TouchableOpacity
-                activeOpacity={0.7}
-                onPress={handleToggleFavoriteSelected}
-                style={[
-                  styles.dockActionButton,
-                  {
-                    backgroundColor: isDark ? '#262224' : '#FFF0F0',
-                  },
-                ]}
-              >
-                <Heart
-                  size={16}
-                  color={selectedAreAllFavorites ? '#FF5E3A' : '#FF7657'}
-                  fill={selectedAreAllFavorites ? '#FF5E3A' : 'transparent'}
-                  strokeWidth={2}
-                />
-                <Text
-                  style={[
-                    styles.dockActionText,
-                    {
-                      color: selectedAreAllFavorites ? '#FF5E3A' : '#FF7657',
-                    },
-                  ]}
-                >
-                  Favorite
-                </Text>
-              </TouchableOpacity>
-
-              {/* Upload CTA Button */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                onPress={handleUploadPhotos}
-                disabled={isUploading || selectedCount === 0}
-                style={[
-                  styles.dockUploadButton,
-                  (isUploading || selectedCount === 0) && styles.dockUploadButtonDisabled,
-                ]}
-              >
-                {isUploading ? (
-                  <>
-                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 6 }} />
-                    <Text style={styles.dockUploadText}>
-                      ({uploadProgress?.current || 0}/{uploadProgress?.total || 0})
+                  <View style={styles.dockTextStack}>
+                    <Text
+                      style={[
+                        styles.dockSelectedCountText,
+                        { color: isDark ? '#F4F4F5' : '#161616' },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {selectedCount} selected
                     </Text>
-                  </>
-                ) : (
-                  <>
+                    <Text
+                      style={[styles.dockSecondaryText, { color: isDark ? '#A1A1AA' : '#71717A' }]}
+                      numberOfLines={1}
+                    >
+                      Ready to upload
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  style={[
+                    styles.dockVerticalDivider,
+                    { backgroundColor: isDark ? '#2E2E36' : '#E4E4E8' },
+                  ]}
+                />
+
+                {/* Right Action: Action Buttons */}
+                <View style={styles.dockRightSection}>
+                  {/* Favorite Button */}
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={handleToggleFavoriteSelected}
+                    disabled={isUploading}
+                    style={[
+                      styles.dockActionButton,
+                      {
+                        backgroundColor: isDark ? '#262224' : '#FFF0F0',
+                      },
+                      isUploading && { opacity: 0.5 },
+                    ]}
+                  >
+                    <Heart
+                      size={16}
+                      color={selectedAreAllFavorites ? '#FF5E3A' : '#FF7657'}
+                      fill={selectedAreAllFavorites ? '#FF5E3A' : 'transparent'}
+                      strokeWidth={2}
+                    />
+                    <Text
+                      style={[
+                        styles.dockActionText,
+                        {
+                          color: selectedAreAllFavorites ? '#FF5E3A' : '#FF7657',
+                        },
+                      ]}
+                    >
+                      Favorite
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Upload CTA Button */}
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handleUploadPhotos}
+                    disabled={isUploading || selectedCount === 0}
+                    style={[
+                      styles.dockUploadButton,
+                      (isUploading || selectedCount === 0) && styles.dockUploadButtonDisabled,
+                    ]}
+                  >
                     <Cloud size={16} color="#FFFFFF" strokeWidth={2.2} />
                     <Text style={styles.dockUploadText}>Upload</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
           </View>
         </Animated.View>
 
@@ -1993,28 +2108,74 @@ const styles = StyleSheet.create({
   // ── 4. Floating Bottom Action Dock Styles ──
   floatingDockContainer: {
     position: 'absolute',
-    left: 16,
-    right: 16,
+    left: 18,
+    right: 18,
     ...Platform.select({
       ios: {
         shadowColor: '#000000',
-        shadowOffset: { width: 0, height: 8 },
-        shadowOpacity: 0.4,
-        shadowRadius: 16,
+        shadowOffset: { width: 0, height: 12 },
+        shadowOpacity: 0.35,
+        shadowRadius: 24,
       },
       android: {
-        elevation: 12,
+        elevation: 16,
       },
     }),
   },
   floatingDockSurface: {
+    height: 74,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 56,
+    borderWidth: 1,
+    borderTopWidth: 1.5,
+    overflow: 'hidden',
+  },
+  dockNormalStateContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'space-between',
+  },
+  dockUploadStateContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 4,
+  },
+  dockUploadTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 10,
-    borderRadius: 44,
-    borderWidth: 1.2,
-    borderTopWidth: 1.5,
+  },
+  dockUploadTopLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dockUploadBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  dockProgressTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  dockProgressBarTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  dockProgressBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  dockProgressCount: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 12,
   },
   dockLeftSection: {
     flexDirection: 'row',
