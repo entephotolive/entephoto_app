@@ -741,6 +741,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
+    if (isUploadingRef.current) {
+      Alert.alert(
+        'Upload in Progress',
+        'Please wait for the current upload to finish before resuming All Upload.',
+      );
+      return;
+    }
+
     console.log('[AllUpload] Resuming All Upload session...');
     isAllUploadPausedRef.current = false;
     setIsAllUploadPaused(false);
@@ -753,7 +761,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // This single function owns the upload process to strictly prevent concurrent upload bugs.
   const executeUploadBatch = useCallback(
     async (batchToUpload: GalleryPhotoItem[], showConfirmation: boolean = true) => {
-      if (isAllUploadActiveRef.current) {
+      if (isAllUploadActiveRef.current && !isAllUploadPausedRef.current) {
         Alert.alert(
           'All Upload Active',
           'An All Upload session is currently active. Manual uploads are disabled while All Upload is running.',
@@ -953,7 +961,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // Floating Dock Animation & Favorite Logic
 
   useEffect(() => {
-    if (selectedCount > 0 || isUploading || isAllUploadActive) {
+    if (selectedCount > 0 || isUploading) {
       Animated.spring(dockSlideAnim, {
         toValue: 1,
         useNativeDriver: true,
@@ -967,7 +975,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         useNativeDriver: true,
       }).start();
     }
-  }, [selectedCount, isUploading, isAllUploadActive, dockSlideAnim]);
+  }, [selectedCount, isUploading, dockSlideAnim]);
 
   useEffect(() => {
     if (!isUploading) {
@@ -1354,9 +1362,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               ],
             },
           ]}
-          pointerEvents={
-            selectedCount > 0 || isUploading || isAllUploadActive ? 'box-none' : 'none'
-          }
+          pointerEvents={selectedCount > 0 || isUploading ? 'box-none' : 'none'}
         >
           <View
             style={[
@@ -1367,47 +1373,17 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               },
             ]}
           >
-            {isAllUploadActive ? (
+            {isAllUploadActive && !isAllUploadPaused && isUploading ? (
               <View style={styles.dockUploadStateContainer}>
-                {/* Top Row: Title + Progress/Status + Pause/Resume Button */}
+                {/* Top Row: Title + Progress/Status */}
                 <View style={styles.dockUploadTopRow}>
                   <View style={styles.dockUploadTopLeft}>
-                    <Cloud
-                      size={18}
-                      color={isAllUploadPaused ? (isDark ? '#F59E0B' : '#D97706') : '#6366F1'}
-                      strokeWidth={2.2}
-                    />
+                    <Cloud size={18} color="#6366F1" strokeWidth={2.2} />
                     <Text
                       style={[styles.dockProgressTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
                     >
                       All Upload
                     </Text>
-                    {isAllUploadPaused ? (
-                      <View
-                        style={[
-                          styles.dockStatusBadge,
-                          { backgroundColor: isDark ? 'rgba(245, 158, 11, 0.18)' : '#FEF3C7' },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.dockStatusBadgeText,
-                            { color: isDark ? '#FBBF24' : '#D97706' },
-                          ]}
-                        >
-                          Paused
-                        </Text>
-                      </View>
-                    ) : !isUploading && !uploadProgress ? (
-                      <Text
-                        style={[
-                          styles.dockStatusIdleText,
-                          { color: isDark ? '#A1A1AA' : '#71717A' },
-                        ]}
-                      >
-                        • Waiting for new photos
-                      </Text>
-                    ) : null}
                   </View>
 
                   <View style={styles.dockAllUploadRightRow}>
@@ -1421,70 +1397,44 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
                 {/* Bottom Row */}
                 <View style={styles.dockUploadBottomRow}>
-                  {isAllUploadPaused ? (
-                    <View style={styles.dockIdleBottomRow}>
-                      <Text
-                        style={[
-                          styles.dockIdleBottomText,
-                          { color: isDark ? '#A1A1AA' : '#71717A' },
-                        ]}
-                      >
-                        Uploading paused. Tap Resume to continue.
-                      </Text>
-                    </View>
-                  ) : !isUploading && !uploadProgress ? (
-                    <View style={styles.dockIdleBottomRow}>
-                      <Text
-                        style={[
-                          styles.dockIdleBottomText,
-                          { color: isDark ? '#A1A1AA' : '#71717A' },
-                        ]}
-                      >
-                        All current photos uploaded • Watching folder for new arrivals
-                      </Text>
-                    </View>
-                  ) : (
-                    <>
-                      <View
-                        style={[
-                          styles.dockProgressBarTrack,
-                          {
-                            flex: 1,
-                            backgroundColor: isDark ? '#1C1C21' : '#EAEAEA',
-                            borderColor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)',
-                            borderWidth: 1,
-                          },
-                        ]}
-                      >
-                        <Animated.View
-                          style={[
-                            styles.dockProgressBarFill,
-                            {
-                              backgroundColor: '#6366F1',
-                              width: progressAnim.interpolate({
-                                inputRange: [0, 100],
-                                outputRange: ['0%', '100%'],
-                              }),
-                            },
-                          ]}
-                        />
-                      </View>
-                      <Text
-                        numberOfLines={1}
-                        style={[
-                          styles.dockProgressCount,
-                          {
-                            color: isDark ? '#A1A1AA' : '#71717A',
-                            minWidth: 38,
-                            flexShrink: 0,
-                            textAlign: 'right',
-                          },
-                        ]}
-                      >
-                        {Math.round(uploadProgress?.bytePercentage || 0)}%
-                      </Text>
-                    </>
-                  )}
+                  <View
+                    style={[
+                      styles.dockProgressBarTrack,
+                      {
+                        flex: 1,
+                        backgroundColor: isDark ? '#1C1C21' : '#EAEAEA',
+                        borderColor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)',
+                        borderWidth: 1,
+                      },
+                    ]}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.dockProgressBarFill,
+                        {
+                          backgroundColor: '#6366F1',
+                          width: progressAnim.interpolate({
+                            inputRange: [0, 100],
+                            outputRange: ['0%', '100%'],
+                          }),
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text
+                    numberOfLines={1}
+                    style={[
+                      styles.dockProgressCount,
+                      {
+                        color: isDark ? '#A1A1AA' : '#71717A',
+                        minWidth: 38,
+                        flexShrink: 0,
+                        textAlign: 'right',
+                      },
+                    ]}
+                  >
+                    {Math.round(uploadProgress?.bytePercentage || 0)}%
+                  </Text>
                 </View>
               </View>
             ) : isUploading ? (
