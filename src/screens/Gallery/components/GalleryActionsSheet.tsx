@@ -11,17 +11,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
-import {
-  RefreshCw,
-  CheckCheck,
-  RotateCcw,
-  Trash2,
-  CloudUpload,
-  X,
-  Layers,
-  Sparkles,
-  CheckSquare,
-} from 'lucide-react-native';
+import { RefreshCw, CheckCheck, RotateCcw, Trash2, CloudUpload, Layers } from 'lucide-react-native';
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
 
@@ -45,10 +35,10 @@ interface ActionTileItem {
   id: string;
   icon: React.ReactNode;
   label: string;
-  sublabel?: string;
-  backgroundColor: string;
+  surfaceTint: string;
   onPress: () => void;
   isDanger?: boolean;
+  disabled?: boolean;
 }
 
 export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
@@ -103,132 +93,145 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
     }
   }, [visible, sheetAnim, tileAnims]);
 
-  // Selected Action Tiles (when selectedCount > 0)
-  const selectedTiles: ActionTileItem[] = [
+  // Action Tiles Array
+  const allTiles: ActionTileItem[] = [
     {
       id: 'upload',
-      icon: <CloudUpload size={24} color="#FF5E3A" strokeWidth={2.3} />,
-      label: `Upload (${selectedCount})`,
-      sublabel: 'Send to cloud',
-      backgroundColor: isDark ? '#331E18' : '#FFEBE2',
+      icon: <CloudUpload size={28} color="#FF5E3A" strokeWidth={2.4} />,
+      label: selectedCount > 0 ? `Upload (${selectedCount})` : 'Upload',
+      surfaceTint: isDark ? 'rgba(255, 94, 58, 0.12)' : 'rgba(255, 94, 58, 0.08)',
       onPress: onUploadSelected,
+      disabled: selectedCount === 0,
     },
     {
       id: 'delete',
-      icon: <Trash2 size={24} color="#EF4444" strokeWidth={2.3} />,
-      label: `Delete (${selectedCount})`,
-      sublabel: 'Erase from storage',
-      backgroundColor: isDark ? '#33161A' : '#FEEBEB',
+      icon: <Trash2 size={28} color="#EF4444" strokeWidth={2.4} />,
+      label: selectedCount > 0 ? `Delete (${selectedCount})` : 'Delete',
+      surfaceTint: isDark ? 'rgba(239, 68, 68, 0.12)' : 'rgba(239, 68, 68, 0.08)',
       onPress: onDeleteSelected,
       isDanger: true,
+      disabled: selectedCount === 0,
     },
-  ];
-
-  // Selection Action Tiles
-  const selectionTiles: ActionTileItem[] = [
     {
       id: 'selectAll',
-      icon: <CheckCheck size={24} color="#10B981" strokeWidth={2.3} />,
-      label: `Select All (${totalCount})`,
-      backgroundColor: isDark ? '#172D23' : '#E8F8F0',
+      icon: <CheckCheck size={28} color="#10B981" strokeWidth={2.4} />,
+      label: totalCount > 0 ? `Select All (${totalCount})` : 'Select All',
+      surfaceTint: isDark ? 'rgba(16, 185, 129, 0.12)' : 'rgba(16, 185, 129, 0.08)',
       onPress: onSelectAll,
+      disabled: totalCount === 0,
     },
-    ...(newCount > 0 && newCount !== totalCount
-      ? [
-          {
-            id: 'selectNew',
-            icon: <CheckSquare size={24} color="#F59E0B" strokeWidth={2.3} />,
-            label: `Select New (${newCount})`,
-            backgroundColor: isDark ? '#332817' : '#FEF5E7',
-            onPress: onSelectAllNew,
-          },
-        ]
-      : []),
     {
       id: 'invert',
-      icon: <Layers size={24} color="#6366F1" strokeWidth={2.3} />,
+      icon: <Layers size={28} color="#8B5CF6" strokeWidth={2.4} />,
       label: 'Invert Selection',
-      backgroundColor: isDark ? '#232238' : '#EEF0FF',
+      surfaceTint: isDark ? 'rgba(139, 92, 246, 0.12)' : 'rgba(139, 92, 246, 0.08)',
       onPress: onInvertSelection,
+      disabled: totalCount === 0,
     },
-    ...(selectedCount > 0
-      ? [
-          {
-            id: 'clear',
-            icon: <RotateCcw size={24} color={isDark ? '#D4D4D8' : '#6B655D'} strokeWidth={2.3} />,
-            label: 'Clear Selection',
-            backgroundColor: isDark ? '#2A2A33' : '#F2ECE4',
-            onPress: onClearSelection,
-          },
-        ]
-      : []),
-  ];
-
-  // Storage / Folder Action Tiles
-  const storageTiles: ActionTileItem[] = [
+    {
+      id: 'clear',
+      icon: <RotateCcw size={28} color={isDark ? '#D4D4D8' : '#6B655D'} strokeWidth={2.4} />,
+      label: 'Clear Selection',
+      surfaceTint: isDark ? 'rgba(212, 212, 216, 0.12)' : 'rgba(107, 101, 93, 0.08)',
+      onPress: onClearSelection,
+      disabled: selectedCount === 0,
+    },
     {
       id: 'rescan',
-      icon: <RefreshCw size={24} color="#3B82F6" strokeWidth={2.3} />,
+      icon: <RefreshCw size={28} color="#3B82F6" strokeWidth={2.4} />,
       label: 'Rescan Photos',
-      backgroundColor: isDark ? '#182538' : '#EBF4FF',
+      surfaceTint: isDark ? 'rgba(59, 130, 246, 0.12)' : 'rgba(59, 130, 246, 0.08)',
       onPress: onRescan,
+      disabled: false,
     },
   ];
 
   let animIndexTracker = 0;
 
-  const renderActionTile = (item: ActionTileItem) => {
+  const renderGridCard = (item: ActionTileItem) => {
     const currentIndex = animIndexTracker++;
     const animValue = tileAnims[currentIndex] || tileAnims[0];
 
     const animatedStyle = {
-      opacity: animValue,
+      opacity: item.disabled ? 0.4 : animValue,
       transform: [
         {
           translateY: animValue.interpolate({
             inputRange: [0, 1],
-            outputRange: [24, 0],
+            outputRange: [20, 0],
           }),
         },
         {
           scale: animValue.interpolate({
             inputRange: [0, 1],
-            outputRange: [0.65, 1],
+            outputRange: [0.92, 1],
           }),
         },
       ],
+      width: '31.33%' as const,
     };
 
     return (
-      <Animated.View key={item.id} style={[styles.tileWrapper, animatedStyle]}>
+      <Animated.View key={item.id} style={animatedStyle}>
         <Pressable
-          onPress={item.onPress}
+          onPress={item.disabled ? undefined : item.onPress}
+          disabled={item.disabled}
           style={({ pressed }) => [
-            styles.tileButton,
+            styles.actionCardButton,
             {
-              backgroundColor: item.backgroundColor,
-              transform: [{ scale: pressed ? 0.92 : 1 }],
-              opacity: pressed ? 0.9 : 1,
+              backgroundColor: pressed
+                ? isDark
+                  ? '#30303D'
+                  : '#F0F0F0'
+                : isDark
+                  ? '#191922'
+                  : '#FFFFFF',
+              borderColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.04)',
+              transform: [{ scale: pressed ? 0.97 : 1 }],
             },
           ]}
           accessibilityRole="button"
           accessibilityLabel={item.label}
         >
-          {item.icon}
-        </Pressable>
+          {/* Subtle color tint overlay for the button surface */}
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: item.surfaceTint, borderRadius: 26 },
+            ]}
+          />
 
-        {/* Label underneath icon tile */}
-        <Text
-          numberOfLines={2}
-          style={[
-            styles.tileLabel,
-            {
-              color: item.isDanger ? '#EF4444' : isDark ? '#F4F4F5' : '#18181B',
-            },
-          ]}
-        >
-          {item.label}
-        </Text>
+          <View
+            style={[
+              styles.actionIconBox,
+              {
+                backgroundColor: isDark ? '#252530' : '#F5F5F7',
+                borderColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.04)',
+              },
+            ]}
+          >
+            {item.icon}
+          </View>
+          <View style={styles.actionTextGroup}>
+            <Text
+              numberOfLines={2}
+              style={[
+                styles.actionCardLabel,
+                {
+                  color: item.isDanger
+                    ? isDark
+                      ? '#FCA5A5'
+                      : '#DC2626'
+                    : isDark
+                      ? '#F4F4F5'
+                      : '#18181B',
+                },
+              ]}
+            >
+              {item.label}
+            </Text>
+          </View>
+        </Pressable>
       </Animated.View>
     );
   };
@@ -261,8 +264,7 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
           style={[
             styles.sheetContainer,
             {
-              backgroundColor: isDark ? '#19191F' : '#FAF7F2',
-              borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(22, 22, 22, 0.06)',
+              backgroundColor: isDark ? 'rgba(17, 17, 24, 0.85)' : 'rgba(250, 247, 242, 0.85)',
               paddingBottom: Math.max(insets.bottom, 16) + 12,
               transform: [
                 {
@@ -276,82 +278,13 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
           ]}
         >
           {/* Smooth Clay Drag Handle */}
-          <View style={[styles.sheetHandle, { backgroundColor: isDark ? '#2E2E38' : '#E3DAD0' }]} />
-
-          {/* Header Row */}
-          <View style={styles.sheetHeader}>
-            <View style={styles.sheetTitleGroup}>
-              <View style={styles.sheetTitleRow}>
-                <View
-                  style={[
-                    styles.headerIconPill,
-                    {
-                      backgroundColor: isDark ? '#2B1E1A' : '#FFEBE2',
-                    },
-                  ]}
-                >
-                  <Sparkles size={16} color="#FF5E3A" strokeWidth={2.4} />
-                </View>
-                <Text style={[styles.sheetTitleText, { color: isDark ? '#F4F4F5' : '#18181B' }]}>
-                  Gallery Actions
-                </Text>
-              </View>
-              <Text style={[styles.sheetSubtitleText, { color: isDark ? '#A1A1AA' : '#8A827A' }]}>
-                {totalCount} photos total • {selectedCount} selected
-              </Text>
-            </View>
-
-            {/* Clay Circular Close Button */}
-            <TouchableOpacity
-              activeOpacity={0.75}
-              onPress={onClose}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              style={[
-                styles.closeButton,
-                {
-                  backgroundColor: isDark ? '#25252E' : '#FFFFFF',
-                  borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)',
-                },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Close actions"
-            >
-              <X size={17} color={isDark ? '#F4F4F5' : '#18181B'} strokeWidth={2.2} />
-            </TouchableOpacity>
-          </View>
+          <View style={[styles.sheetHandle, { backgroundColor: isDark ? '#4A4A5A' : '#D0D0D0' }]} />
 
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.actionsListContent}
           >
-            {/* ── 1. SELECTED PHOTOS ACTIONS (IF PHOTOS SELECTED) ── */}
-            {selectedCount > 0 && (
-              <View style={styles.actionSectionGroup}>
-                <Text style={[styles.sectionHeading, { color: isDark ? '#8E8E9A' : '#948E86' }]}>
-                  SELECTED ACTIONS ({selectedCount})
-                </Text>
-
-                <View style={styles.tileGridRow}>{selectedTiles.map(renderActionTile)}</View>
-              </View>
-            )}
-
-            {/* ── 2. SELECTION SHORTCUTS ── */}
-            <View style={styles.actionSectionGroup}>
-              <Text style={[styles.sectionHeading, { color: isDark ? '#8E8E9A' : '#948E86' }]}>
-                SELECTION
-              </Text>
-
-              <View style={styles.tileGridRow}>{selectionTiles.map(renderActionTile)}</View>
-            </View>
-
-            {/* ── 3. DEVICE & FOLDER ── */}
-            <View style={styles.actionSectionGroup}>
-              <Text style={[styles.sectionHeading, { color: isDark ? '#8E8E9A' : '#948E86' }]}>
-                DEVICE & FOLDER
-              </Text>
-
-              <View style={styles.tileGridRow}>{storageTiles.map(renderActionTile)}</View>
-            </View>
+            <View style={styles.actionGridContainer}>{allTiles.map(renderGridCard)}</View>
           </ScrollView>
 
           {/* Dismiss / Close Pill Button */}
@@ -361,8 +294,8 @@ export const GalleryActionsSheet: React.FC<GalleryActionsSheetProps> = ({
             style={[
               styles.dismissButton,
               {
-                backgroundColor: isDark ? '#282832' : '#FFFFFF',
-                borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)',
+                backgroundColor: isDark ? '#191922' : '#FFFFFF',
+                borderColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.04)',
               },
             ]}
           >
@@ -385,157 +318,101 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
   },
   sheetContainer: {
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: 12,
     maxHeight: '85%',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: -8 },
-        shadowOpacity: 0.16,
-        shadowRadius: 20,
-      },
-      android: {
-        elevation: 16,
-      },
-    }),
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
   },
   sheetHandle: {
-    width: 42,
-    height: 5,
-    borderRadius: 10,
-    alignSelf: 'center',
-    marginBottom: 16,
-  },
-  sheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(150, 150, 150, 0.1)',
-    marginBottom: 14,
-  },
-  sheetTitleGroup: {
-    flex: 1,
-  },
-  sheetTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  headerIconPill: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sheetTitleText: {
-    fontFamily: FONTS.syne.bold,
-    fontSize: 18,
-    fontWeight: '700',
-    letterSpacing: -0.3,
-  },
-  sheetSubtitleText: {
-    fontFamily: FONTS.plusJakartaSans.medium,
-    fontSize: 12.5,
-    marginTop: 3,
-  },
-  closeButton: {
     width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.06,
-        shadowRadius: 4,
-      },
-      android: {
-        elevation: 2,
-      },
-    }),
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 24,
   },
   actionsListContent: {
-    paddingVertical: 6,
-    gap: 18,
+    paddingBottom: 4,
   },
-  actionSectionGroup: {
-    gap: 10,
-  },
-  sectionHeading: {
-    fontFamily: FONTS.jetbrainsMono.bold,
-    fontSize: 10.5,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    marginBottom: 2,
-    paddingHorizontal: 2,
-  },
-  tileGridRow: {
+  actionGridContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 14,
+    justifyContent: 'space-between',
+    gap: 10,
   },
-  tileWrapper: {
-    alignItems: 'center',
-    width: 78,
-  },
-  tileButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 18,
+  actionCardButton: {
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 7,
+    paddingVertical: 18,
+    paddingHorizontal: 8,
+    borderRadius: 26,
+    borderWidth: 1,
+    height: 125,
     ...Platform.select({
       ios: {
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 3 },
-        shadowOpacity: 0.06,
-        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.25,
+        shadowRadius: 14,
       },
       android: {
-        elevation: 2,
+        elevation: 8,
       },
     }),
   },
-  tileLabel: {
-    fontFamily: FONTS.plusJakartaSans.semiBold,
-    fontSize: 11.5,
-    textAlign: 'center',
-    lineHeight: 14.5,
-  },
-  dismissButton: {
-    marginTop: 14,
-    paddingVertical: 14,
-    borderRadius: 22,
+  actionIconBox: {
+    width: 52,
+    height: 52,
+    borderRadius: 18,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    alignSelf: 'center',
+    marginBottom: 12,
     ...Platform.select({
       ios: {
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.07,
+        shadowOpacity: 0.15,
         shadowRadius: 5,
       },
       android: {
-        elevation: 2,
+        elevation: 3,
+      },
+    }),
+  },
+  actionTextGroup: {
+    alignItems: 'center',
+  },
+  actionCardLabel: {
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  dismissButton: {
+    marginTop: 18,
+    paddingVertical: 18,
+    borderRadius: 28,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.2,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 6,
       },
     }),
   },
   dismissButtonText: {
     fontFamily: FONTS.syne.bold,
-    fontSize: 14.5,
+    fontSize: 16,
     fontWeight: '700',
     letterSpacing: -0.2,
   },

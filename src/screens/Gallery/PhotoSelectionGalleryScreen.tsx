@@ -334,7 +334,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const handleSelectAll = useCallback(() => {
     setSelectedPhotoIds(prev => {
       const next = new Set(prev);
-      photos.forEach(p => {
+      filteredPhotos.forEach(p => {
         if (p.status !== 'uploaded') {
           next.add(p.id);
         }
@@ -342,13 +342,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [photos]);
+  }, [filteredPhotos]);
 
   // Select All New Photos (unrestricted selection count)
   const handleSelectAllNew = useCallback(() => {
     setSelectedPhotoIds(prev => {
       const next = new Set(prev);
-      photos.forEach(p => {
+      filteredPhotos.forEach(p => {
         if (p.status === 'new') {
           next.add(p.id);
         }
@@ -356,22 +356,24 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [photos]);
+  }, [filteredPhotos]);
 
   // Invert Selection (unrestricted selection count)
   const handleInvertSelection = useCallback(() => {
     setSelectedPhotoIds(prev => {
-      const next = new Set<string>();
-      photos.forEach(p => {
+      const next = new Set(prev);
+      filteredPhotos.forEach(p => {
         if (p.status === 'uploaded') return;
-        if (!prev.has(p.id)) {
+        if (prev.has(p.id)) {
+          next.delete(p.id);
+        } else {
           next.add(p.id);
         }
       });
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [photos]);
+  }, [filteredPhotos]);
 
   // Clear Selection
   const handleClearSelection = useCallback(() => {
@@ -397,44 +399,56 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           style: 'destructive',
           onPress: async () => {
             setIsActionsModalVisible(false);
-            const selectedUris = new Set(selectedPhotos.map(p => p.uri));
-            const selectedIds = new Set(selectedPhotos.map(p => p.id));
+
+            const successIds = new Set<string>();
+            const successUris = new Set<string>();
+            let failCount = 0;
 
             // Delete files from storage
             await Promise.all(
               selectedPhotos.map(async photo => {
                 try {
                   await deleteLocalPhoto(photo.uri);
+                  successIds.add(photo.id);
+                  successUris.add(photo.uri);
                 } catch (e) {
                   console.error('[GalleryActions] Failed to delete photo file:', photo.uri, e);
+                  failCount++;
                 }
               }),
             );
 
-            // Clear deleted IDs from selection and favorite sets
+            // Clear ONLY successful deleted IDs from selection and favorite sets
             setSelectedPhotoIds(prev => {
               const next = new Set(prev);
-              selectedIds.forEach(id => next.delete(id));
+              successIds.forEach(id => next.delete(id));
               return next;
             });
             setFavoritePhotoIds(prev => {
               const next = new Set(prev);
-              selectedIds.forEach(id => next.delete(id));
+              successIds.forEach(id => next.delete(id));
               return next;
             });
 
-            // Update state
-            setPhotos(prev => prev.filter(p => !selectedIds.has(p.id) && !selectedUris.has(p.uri)));
+            // Update state ONLY for successful deletions
+            setPhotos(prev => prev.filter(p => !successIds.has(p.id) && !successUris.has(p.uri)));
 
-            Alert.alert(
-              'Photos Deleted 🗑️',
-              `Successfully deleted ${selectedPhotos.length} photo${selectedPhotos.length > 1 ? 's' : ''} from local storage.`,
-            );
+            if (failCount === 0) {
+              Alert.alert(
+                'Photos Deleted 🗑️',
+                `Successfully deleted ${successIds.size} photo${successIds.size > 1 ? 's' : ''} from local storage.`,
+              );
+            } else {
+              Alert.alert(
+                'Partial Deletion',
+                `Successfully deleted ${successIds.size} photo${successIds.size !== 1 ? 's' : ''}, but ${failCount} failed to delete and remain selected.`,
+              );
+            }
           },
         },
       ],
     );
-  }, [photos]);
+  }, [photos, selectedPhotoIds]);
 
   // Rescan Trigger from Action Sheet
   const handleRescanFromSheet = useCallback(async () => {
