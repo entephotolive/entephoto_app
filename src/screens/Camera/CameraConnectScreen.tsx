@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -23,6 +23,7 @@ import {
   Wifi,
   Usb,
   Camera,
+  Terminal,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -31,6 +32,15 @@ import { useTheme } from '@/constants/theme';
 import { FONTS } from '@/constants/typography';
 import { formatEventDate } from '@/utils/date';
 import { AppBackground } from '@/components/AppBackground';
+import {
+  startSearch,
+  stopSearch,
+  addConnectionStateListener,
+  addDeviceFoundListener,
+  addDeviceDisconnectedListener,
+} from 'entephoto-camera';
+import type { ConnectionState } from 'entephoto-camera';
+import { CameraDiagnosticConsole } from './CameraDiagnosticConsole';
 
 // ── Image Assets ────────────────────────────────────────────────────────────
 const CAMERA_HERO_IMAGE = require('../../../assets/ctAYourCamera/28328fe7-79dc-438d-8f78-16cd13c144cf.png');
@@ -68,12 +78,17 @@ export const CameraConnectScreen: React.FC = () => {
 
   // Selected Connection Mode: 'wifi' | 'usbc' (Default: 'usbc')
   const [connectionMode, setConnectionMode] = useState<'wifi' | 'usbc'>('usbc');
-  const [isSearching, setIsSearching] = useState(false);
+  // ── Native camera bridge state ────────────────────────────────────────────
+  const [cameraState, setCameraState] = useState<ConnectionState>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isSearching = cameraState === 'searching' || cameraState === 'connecting';
+
   const [isHelpModalVisible, setIsHelpModalVisible] = useState(false);
   const [isWifiUnavailableModalVisible, setIsWifiUnavailableModalVisible] = useState(false);
+  const [isDiagnosticVisible, setIsDiagnosticVisible] = useState(false);
 
   // Animated Search Pulse
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseAnimRef = useRef(new Animated.Value(1));
 
   // Functional Back Navigation Handler
   const handleBack = useCallback(() => {
@@ -88,42 +103,100 @@ export const CameraConnectScreen: React.FC = () => {
     setIsWifiUnavailableModalVisible(true);
   }, []);
 
-  const handleSearchCamera = useCallback(() => {
-    setIsSearching(true);
+  // ── Native camera event listeners (registered once on mount) ────────────
+  useEffect(() => {
+    console.log('[CameraConnect] Screen mounted — registering native camera listeners');
 
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1.03,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-      ]),
-    ).start();
+    const stateListener = addConnectionStateListener(event => {
+      console.log('[CameraConnect] Native connection state:', event.state);
+      setCameraState(event.state);
 
-    setTimeout(() => {
-      setIsSearching(false);
-      pulseAnim.stopAnimation();
-      pulseAnim.setValue(1);
+      if (event.state === 'searching') {
+        // Start pulse animation while searching
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(pulseAnimRef.current, {
+              toValue: 1.03,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseAnimRef.current, {
+              toValue: 1,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+          ]),
+        ).start();
+      } else {
+        pulseAnimRef.current.stopAnimation();
+        pulseAnimRef.current.setValue(1);
+      }
+
+      if (event.state !== 'error') {
+        setErrorMessage(null);
+      }
+    });
+
+    const deviceFoundListener = addDeviceFoundListener(event => {
+      console.log('[CameraConnect] Native device found:', event.deviceName);
+      if (!navigation.isFocused()) {
+        console.log('[CameraConnect] Screen is not focused — ignoring onDeviceFound navigation');
+        return;
+      }
+      setErrorMessage(null);
+      // Navigate to connected screen with the real device name from native
       navigation.navigate('CameraConnected', {
         eventId: route.params?.eventId,
         eventTitle,
         eventDate: route.params?.eventDate,
         eventCategory: route.params?.eventCategory,
         coverImage,
-        cameraModel: 'Sony A7 IV',
+        cameraModel: event.deviceName,
         connectionType: connectionMode,
-        photoCount: 326,
       });
-    }, 1800);
+    });
+
+    const disconnectedListener = addDeviceDisconnectedListener(event => {
+      console.log('[CameraConnect] Native device disconnected, reason:', event.reason);
+
+      // Map native reason codes to user-friendly messages
+      let userMessage: string;
+      switch (event.reason) {
+        case 'PermissionDenied':
+          userMessage = 'USB permission was denied. Please allow access when prompted.';
+          break;
+        case 'ErrorNotSony':
+          userMessage = 'This device is not a supported Sony camera.';
+          break;
+        case 'ErrorPcRemote':
+          userMessage = 'Could not start camera remote session. Check camera PC Remote settings.';
+          break;
+        case 'idle':
+          userMessage = 'Camera disconnected.';
+          break;
+        default:
+          // ErrorConnectionFailed or anything else — log real reason, show clean message
+          console.log('[CameraConnect] Native disconnected raw reason:', event.reason);
+          userMessage = 'Camera connection lost. Please check the USB cable and try again.';
+      }
+      setErrorMessage(userMessage);
+    });
+
+    return () => {
+      console.log('[CameraConnect] Screen unmounting — removing native camera listeners');
+      stateListener.remove();
+      deviceFoundListener.remove();
+      disconnectedListener.remove();
+      // Stop any active search when screen is left
+      try {
+        stopSearch();
+      } catch (e) {
+        console.warn('[CameraConnect] stopSearch() during cleanup threw:', e);
+      }
+    };
   }, [
     navigation,
-    pulseAnim,
+    pulseAnimRef,
     route.params?.eventId,
     route.params?.eventDate,
     route.params?.eventCategory,
@@ -131,6 +204,25 @@ export const CameraConnectScreen: React.FC = () => {
     coverImage,
     connectionMode,
   ]);
+
+  const handleSearchCamera = useCallback(() => {
+    if (isSearching) {
+      console.log('[CameraConnect] Search button pressed — already searching, ignoring duplicate');
+      return;
+    }
+    console.log('[CameraConnect] Search button pressed');
+    setErrorMessage(null);
+
+    try {
+      startSearch();
+      // State update (idle → searching) will arrive via onConnectionStateChanged listener
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error('[CameraConnect] startSearch() threw:', message);
+      setCameraState('error');
+      setErrorMessage('Could not start camera search. Please restart the app and try again.');
+    }
+  }, [isSearching]);
 
   return (
     <AppBackground>
@@ -554,8 +646,37 @@ export const CameraConnectScreen: React.FC = () => {
                   Keep your camera nearby
                 </Text>
               </View>
+
+              <View style={styles.checklistItem}>
+                <View style={styles.checkBullet}>
+                  <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                </View>
+                <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
+                  Sony settings: PC Remote &gt; Save Dest = &quot;PC+Camera&quot;
+                </Text>
+              </View>
             </View>
           </View>
+
+          {/* ── DIAGNOSTIC CONSOLE BUTTON ── */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => setIsDiagnosticVisible(true)}
+            style={[
+              styles.diagTriggerBtn,
+              {
+                backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
+                borderColor: isDark ? '#38BDF8' : '#2563EB',
+              },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Open Camera Diagnostic Console"
+          >
+            <Terminal size={15} color={isDark ? '#38BDF8' : '#2563EB'} strokeWidth={2.2} />
+            <Text style={[styles.diagTriggerText, { color: isDark ? '#38BDF8' : '#2563EB' }]}>
+              Open Camera Diagnostic Console
+            </Text>
+          </TouchableOpacity>
 
           {/* ── 6. PRIMARY CTA BUTTON ("Search for Camera") ── */}
           <Pressable
@@ -594,7 +715,7 @@ export const CameraConnectScreen: React.FC = () => {
                   style={[
                     styles.ctaButtonFace,
                     {
-                      transform: [{ scale: pulseAnim }],
+                      transform: [{ scale: pulseAnimRef.current }],
                     },
                   ]}
                 >
@@ -619,7 +740,41 @@ export const CameraConnectScreen: React.FC = () => {
             )}
           </Pressable>
 
-          {/* ── 7. FOOTER HELP LINK ── */}
+          {/* ── 7. ERROR / DISCONNECTED BANNER (visible only on error/disconnect) ── */}
+          {errorMessage !== null && (
+            <View
+              style={[
+                styles.errorBanner,
+                {
+                  backgroundColor: isDark ? '#2A1515' : '#FFF0ED',
+                  borderColor: isDark ? '#5E2020' : '#FF6B4A',
+                },
+              ]}
+            >
+              <X
+                size={16}
+                color="#FF6B4A"
+                strokeWidth={2.5}
+                style={{ marginRight: 8, flexShrink: 0 }}
+              />
+              <Text
+                style={[styles.errorBannerText, { color: isDark ? '#FFA384' : '#C43D1D', flex: 1 }]}
+              >
+                {errorMessage}
+              </Text>
+              <TouchableOpacity
+                onPress={handleSearchCamera}
+                disabled={isSearching}
+                style={styles.errorRetryBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Retry camera search"
+              >
+                <Text style={styles.errorRetryText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ── 8. FOOTER HELP LINK ── */}
           <TouchableOpacity
             activeOpacity={0.75}
             onPress={() => setIsHelpModalVisible(true)}
@@ -827,6 +982,16 @@ export const CameraConnectScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
         </View>
+      </Modal>
+
+      {/* ── Diagnostic Console Modal ── */}
+      <Modal
+        visible={isDiagnosticVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setIsDiagnosticVisible(false)}
+      >
+        <CameraDiagnosticConsole onClose={() => setIsDiagnosticVisible(false)} />
       </Modal>
     </AppBackground>
   );
@@ -1216,7 +1381,35 @@ const styles = StyleSheet.create({
     gap: 8,
   },
 
-  // ── 7. Footer Help Link ──
+  // ── 7. Error / Disconnected Banner ──
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 12,
+  },
+  errorBannerText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  errorRetryBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: '#FF6B4A',
+    marginLeft: 10,
+  },
+  errorRetryText: {
+    color: '#FFFFFF',
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 12,
+  },
+
+  // ── 8. Footer Help Link ──
   helpLinkContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1438,5 +1631,22 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.plusJakartaSans.bold,
     fontSize: 15,
     letterSpacing: 0.2,
+  },
+
+  // ── Diagnostic Console Button ──
+  diagTriggerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+    gap: 8,
+  },
+  diagTriggerText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
   },
 });

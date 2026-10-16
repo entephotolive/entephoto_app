@@ -1,5 +1,6 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import { Directory, File } from 'expo-file-system';
+import { addPhotoSavedListener } from 'entephoto-camera';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
 import { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH } from '@/config/photo.config';
 
@@ -18,7 +19,15 @@ const SUPPORTED_EXTENSIONS = [
   '.nef',
   '.dng',
   '.heic',
+  '.hif',
   '.webp',
+  '.tif',
+  '.tiff',
+  '.rw2',
+  '.orf',
+  '.raf',
+  '.srw',
+  '.pef',
 ];
 
 // Genuine RAW Camera Extensions
@@ -164,23 +173,37 @@ export async function scanDcimEntephotoPhotos(
   }
 
   try {
-    const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+    const candidateUris = Array.from(
+      new Set([
+        CANONICAL_DCIM_DIR_URI,
+        'file:///sdcard/DCIM/entephoto',
+        'file:///sdcard/DCIM/Entephoto',
+      ]),
+    );
 
-    if (!dir.exists) {
-      if (!silent) {
-        console.warn(
-          `[LocalPhotoService] Directory does not exist on device: ${CANONICAL_DCIM_DIR_URI}`,
-        );
+    const fileMap = new Map<string, File>();
+
+    for (const uri of candidateUris) {
+      try {
+        const dir = new Directory(uri);
+        if (dir.exists) {
+          const entries = dir.list();
+          for (const entry of entries) {
+            if (entry instanceof File && isPhotoFile(entry.name)) {
+              if (!fileMap.has(entry.name)) {
+                fileMap.set(entry.name, entry);
+              }
+            }
+          }
+        }
+      } catch {
+        // Individual directory access error, continue scanning others
       }
-      return [];
     }
 
-    const entries = dir.list();
-    const photoEntries = entries.filter((entry): entry is File => {
-      return entry instanceof File && isPhotoFile(entry.name);
-    });
+    const photoEntries = Array.from(fileMap.values());
 
-    const scannedPhotos: GalleryPhotoItem[] = photoEntries.map((file, index) => {
+    const scannedPhotos: GalleryPhotoItem[] = photoEntries.map(file => {
       const isRaw = isRawPhoto(file.name);
       const modTime = file.modificationTime;
 
@@ -193,7 +216,7 @@ export async function scanDcimEntephotoPhotos(
 
       // Use fast manual HH:MM formatting instead of toLocaleTimeString (avoids Intl
       // initialization overhead on Hermes which causes blocking delays in tight loops).
-      const timeFormatted = capturedAt ? formatTime(capturedAt) : 'Just now';
+      const timeFormatted = capturedAt ? formatTime(capturedAt) : '--:--';
 
       return {
         // Use filename-based stable ID — avoids the expensive sequential MediaLibrary
@@ -213,15 +236,18 @@ export async function scanDcimEntephotoPhotos(
       };
     });
 
-    if (scannedPhotos.length > 0) {
+    if (scannedPhotos.length > 0 && !silent) {
       console.log(`[LocalPhotoService] Scanned ${scannedPhotos.length} photos.`);
     }
 
-    // Preserve the correct chronological order (newest first)
+    // Preserve the correct chronological order (newest first) with deterministic tiebreaking
     scannedPhotos.sort((a, b) => {
       const timeA = a.capturedAt ?? 0;
       const timeB = b.capturedAt ?? 0;
-      return timeB - timeA;
+      if (timeA !== timeB) {
+        return timeB - timeA;
+      }
+      return (b.filename || b.id).localeCompare(a.filename || a.id);
     });
 
     return scannedPhotos;
@@ -259,6 +285,7 @@ export function subscribeToDcimPhotos(
   let isSubscribed = true;
   let isScanning = false;
   let watcherSubscription: { remove: () => void } | null = null;
+  let photoSavedSub: { remove: () => void } | null = null;
   let nextPollTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSignature = '';
 
@@ -307,8 +334,6 @@ export function subscribeToDcimPhotos(
     });
 
   // 2. Set up native directory watcher for instant notification of new camera photos.
-  //    The watcher callback is also guarded by isScanning so it cannot launch an
-  //    overlapping scan if a poll is already in progress.
   if (Platform.OS === 'android') {
     try {
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
@@ -316,7 +341,6 @@ export function subscribeToDcimPhotos(
         watcherSubscription = dir.watch(() => {
           if (!isScanning && isSubscribed) {
             console.log('[LocalPhotoService] Directory change detected, triggering scan.');
-            // Cancel any pending poll timer so we don't double-scan shortly after.
             if (nextPollTimer !== null) {
               clearTimeout(nextPollTimer);
               nextPollTimer = null;
@@ -331,6 +355,24 @@ export function subscribeToDcimPhotos(
         err,
       );
     }
+
+    // 3. Hook into native onPhotoSaved event for instant gallery updates
+    try {
+      photoSavedSub = addPhotoSavedListener(event => {
+        console.log(
+          '[LocalPhotoService] onPhotoSaved event received:',
+          event.filename,
+          '— triggering immediate scan',
+        );
+        if (nextPollTimer !== null) {
+          clearTimeout(nextPollTimer);
+          nextPollTimer = null;
+        }
+        runScan(true);
+      });
+    } catch (err) {
+      console.warn('[LocalPhotoService] Failed to bind addPhotoSavedListener:', err);
+    }
   }
 
   return () => {
@@ -342,6 +384,11 @@ export function subscribeToDcimPhotos(
     if (watcherSubscription) {
       try {
         watcherSubscription.remove();
+      } catch {}
+    }
+    if (photoSavedSub) {
+      try {
+        photoSavedSub.remove();
       } catch {}
     }
   };

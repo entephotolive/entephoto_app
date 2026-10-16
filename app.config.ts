@@ -21,6 +21,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ...(Array.isArray(config.plugins) ? config.plugins : []),
       '@react-native-google-signin/google-signin',
       'expo-image',
+      // USB camera config plugin — injects USB host feature + Sony device filter into AndroidManifest.xml
+      './plugins/withEntePhotoCamera',
     ],
   };
 };

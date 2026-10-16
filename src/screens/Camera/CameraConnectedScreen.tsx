@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   StyleSheet,
@@ -7,6 +7,8 @@ import {
   Pressable,
   ScrollView,
   Alert,
+  ActivityIndicator,
+  Modal,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Polygon, Line } from 'react-native-svg';
@@ -19,11 +21,13 @@ import {
   Usb,
   Image as ImageIcon,
   Settings,
-  ChevronRight,
   Heart,
   Images,
   CheckSquare,
   ArrowUp,
+  Power,
+  Terminal,
+  AlertTriangle,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -32,6 +36,9 @@ import { useTheme } from '@/constants/theme';
 import { FONTS } from '@/constants/typography';
 import { formatEventDate } from '@/utils/date';
 import { AppBackground } from '@/components/AppBackground';
+import { addPhotoSavedListener, addPhotoTransferErrorListener, disconnect } from 'entephoto-camera';
+import type { PhotoSavedEvent, PhotoTransferErrorEvent } from 'entephoto-camera';
+import { CameraDiagnosticConsole } from './CameraDiagnosticConsole';
 
 // ── Image Assets ────────────────────────────────────────────────────────────
 const SONY_CAMERA_HERO = require('../../../assets/ctAYourCamera/527a3e8b-c9b0-4344-8f9a-182b25e5a8c2.png');
@@ -60,7 +67,41 @@ export const CameraConnectedScreen: React.FC = () => {
   const coverImage = route.params?.coverImage;
   const cameraModel = route.params?.cameraModel || 'Sony A7 IV';
   const connectionType = route.params?.connectionType || 'wifi';
-  const photoCount = route.params?.photoCount || 326;
+
+  // Live photo count: increments each time a real photo is saved during this session.
+  const [photoCount, setPhotoCount] = useState<number>(0);
+  const [isDiagnosticVisible, setIsDiagnosticVisible] = useState(false);
+  const [lastTransferError, setLastTransferError] = useState<string | null>(null);
+
+  // Subscribe to photo-save and transfer-error events while on this screen.
+  useEffect(() => {
+    const photoSavedSub = addPhotoSavedListener((event: PhotoSavedEvent) => {
+      console.log(
+        '[CameraConnected] onPhotoSaved — filename:',
+        event.filename,
+        'mimeType:',
+        event.mimeType,
+        'uri:',
+        event.uri,
+      );
+      setPhotoCount(prev => prev + 1);
+    });
+
+    const errorSub = addPhotoTransferErrorListener((event: PhotoTransferErrorEvent) => {
+      console.warn(
+        '[CameraConnected] onPhotoTransferError:',
+        event.message,
+        'handle:',
+        event.handle,
+      );
+      setLastTransferError(event.message);
+    });
+
+    return () => {
+      photoSavedSub.remove();
+      errorSub.remove();
+    };
+  }, []);
 
   // Back navigation handler
   const handleBack = useCallback(() => {
@@ -93,15 +134,65 @@ export const CameraConnectedScreen: React.FC = () => {
     photoCount,
   ]);
 
+  // Disconnection state to disable repeated taps
+  const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
+
+  // Disconnect handler
+  const handleDisconnect = useCallback(() => {
+    if (isDisconnecting) return;
+
+    Alert.alert(
+      'Disconnect Camera?',
+      `Are you sure you want to disconnect ${cameraModel}? Photo transfer will stop and USB resources will be released.`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Disconnect',
+          style: 'destructive',
+          onPress: () => {
+            setIsDisconnecting(true);
+            try {
+              console.log('[CameraConnected] Initiating explicit camera disconnect...');
+              disconnect();
+              console.log('[CameraConnected] Native disconnect() invoked successfully');
+              navigation.navigate('CameraConnect', {
+                eventId: route.params?.eventId,
+                eventTitle,
+                eventDate: route.params?.eventDate,
+                eventCategory: route.params?.eventCategory,
+                coverImage,
+              });
+            } catch (error) {
+              console.error('[CameraConnected] Disconnect failed:', error);
+              Alert.alert(
+                'Disconnection Failed',
+                'An error occurred while disconnecting the camera. Please disconnect the USB cable directly.',
+              );
+              setIsDisconnecting(false);
+            }
+          },
+        },
+      ],
+      { cancelable: true },
+    );
+  }, [isDisconnecting, cameraModel, navigation, route.params, eventTitle, coverImage]);
+
   // Camera Settings handler
   const handleCameraSettings = useCallback(() => {
     Alert.alert(
       'Camera Settings',
       `${cameraModel} is configured for real-time sync.\n\nConnection: ${
         connectionType === 'wifi' ? 'Wi-Fi Direct (5 GHz)' : 'USB-C (High Speed)'
-      }\nStorage: SD Card 1 (64 GB available)`,
+      }`,
+      [
+        { text: 'Close', style: 'cancel' },
+        { text: 'Disconnect Camera', style: 'destructive', onPress: handleDisconnect },
+      ],
     );
-  }, [cameraModel, connectionType]);
+  }, [cameraModel, connectionType, handleDisconnect]);
 
   return (
     <AppBackground>
@@ -327,46 +418,109 @@ export const CameraConnectedScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* Right Column: Pill-shaped "Camera Settings" Secondary Button */}
-              <Pressable
-                onPress={handleCameraSettings}
-                style={({ pressed }) => [
-                  styles.settingsBtnWrapper,
-                  {
-                    transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
-                  },
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel="Camera Settings"
-              >
-                <View
-                  style={[
-                    styles.settingsBtnFace,
+              {/* Right Column: Settings + Diagnostics Buttons */}
+              <View style={styles.actionColumn}>
+                <Pressable
+                  onPress={handleCameraSettings}
+                  style={({ pressed }) => [
+                    styles.settingsBtnWrapper,
                     {
-                      backgroundColor: isDark ? '#26262E' : '#FFFFFF',
-                      borderColor: isDark ? '#3F3F46' : '#161616',
+                      transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
                     },
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Camera Settings"
                 >
-                  <Settings
-                    size={14}
-                    color={isDark ? '#F4F4F5' : '#161616'}
-                    strokeWidth={2.2}
-                    style={{ marginRight: 5 }}
-                  />
-                  <Text style={[styles.settingsBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                    Camera Settings
-                  </Text>
-                  <ChevronRight
-                    size={14}
-                    color={isDark ? '#A1A1AA' : '#161616'}
-                    strokeWidth={2.4}
-                    style={{ marginLeft: 3 }}
-                  />
-                </View>
-              </Pressable>
+                  <View
+                    style={[
+                      styles.settingsBtnFace,
+                      {
+                        backgroundColor: isDark ? '#26262E' : '#FFFFFF',
+                        borderColor: isDark ? '#3F3F46' : '#161616',
+                      },
+                    ]}
+                  >
+                    <Settings
+                      size={13}
+                      color={isDark ? '#F4F4F5' : '#161616'}
+                      strokeWidth={2.2}
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text
+                      style={[styles.settingsBtnText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                    >
+                      Settings
+                    </Text>
+                  </View>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => setIsDiagnosticVisible(true)}
+                  style={({ pressed }) => [
+                    styles.diagBtnWrapper,
+                    {
+                      transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
+                    },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Diagnostic Console"
+                >
+                  <View
+                    style={[
+                      styles.diagBtnFace,
+                      {
+                        backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
+                        borderColor: isDark ? '#38BDF8' : '#2563EB',
+                      },
+                    ]}
+                  >
+                    <Terminal
+                      size={13}
+                      color={isDark ? '#38BDF8' : '#2563EB'}
+                      strokeWidth={2.2}
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text style={[styles.diagBtnText, { color: isDark ? '#38BDF8' : '#2563EB' }]}>
+                      Logs
+                    </Text>
+                  </View>
+                </Pressable>
+              </View>
             </View>
           </View>
+
+          {/* ── TRANSFER ERROR BANNER (Tappable to open diagnostics) ── */}
+          {lastTransferError && (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[
+                styles.transferErrorBanner,
+                {
+                  backgroundColor: isDark ? '#3B1212' : '#FEF2F2',
+                  borderColor: '#EF4444',
+                },
+              ]}
+              onPress={() => setIsDiagnosticVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="View transfer error diagnostics"
+            >
+              <AlertTriangle
+                size={18}
+                color="#EF4444"
+                strokeWidth={2.4}
+                style={{ marginRight: 8 }}
+              />
+              <View style={styles.transferErrorTextContainer}>
+                <Text style={styles.transferErrorTitle}>Photo Transfer Failed</Text>
+                <Text
+                  style={[styles.transferErrorDesc, { color: isDark ? '#FCA5A5' : '#B91C1C' }]}
+                  numberOfLines={2}
+                >
+                  {lastTransferError} — Tap to view diagnostics
+                </Text>
+              </View>
+            </TouchableOpacity>
+          )}
 
           {/* ── 5. STATUS CONFIRMATION BANNER ── */}
           <View style={styles.statusBannerShadowWrapper}>
@@ -519,7 +673,73 @@ export const CameraConnectedScreen: React.FC = () => {
               </View>
             )}
           </Pressable>
+
+          {/* ── 8. SECONDARY ACTION: DISCONNECT CAMERA ── */}
+          <Pressable
+            onPress={handleDisconnect}
+            disabled={isDisconnecting}
+            accessibilityRole="button"
+            accessibilityLabel="Disconnect Camera"
+            style={({ pressed }) => [
+              styles.disconnectBtnWrapper,
+              {
+                opacity: isDisconnecting ? 0.7 : 1,
+                transform: [
+                  { translateY: pressed && !isDisconnecting ? 2 : 0 },
+                  { translateX: pressed && !isDisconnecting ? 2 : 0 },
+                ],
+              },
+            ]}
+          >
+            {({ pressed }) => (
+              <View style={styles.disconnectBtnContainer}>
+                {/* Hard Neo-Brutalist Shadow Underlay Layer */}
+                <View
+                  style={[
+                    styles.disconnectShadowLayer,
+                    {
+                      top: pressed && !isDisconnecting ? 2 : 4,
+                      left: pressed && !isDisconnecting ? 2 : 4,
+                      right: pressed && !isDisconnecting ? -2 : -4,
+                      bottom: pressed && !isDisconnecting ? -2 : -4,
+                      backgroundColor: isDark ? '#000000' : '#161616',
+                    },
+                  ]}
+                />
+
+                {/* Main Destructive Button Face */}
+                <View
+                  style={[
+                    styles.disconnectBtnFace,
+                    {
+                      backgroundColor: isDark ? '#221919' : '#FFF5F5',
+                      borderColor: isDark ? '#E5484D' : '#161616',
+                    },
+                  ]}
+                >
+                  {isDisconnecting ? (
+                    <ActivityIndicator size="small" color="#E5484D" style={{ marginRight: 8 }} />
+                  ) : (
+                    <Power size={18} color="#E5484D" strokeWidth={2.4} style={{ marginRight: 8 }} />
+                  )}
+                  <Text style={styles.disconnectBtnText}>
+                    {isDisconnecting ? 'Disconnecting...' : 'Disconnect Camera'}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </Pressable>
         </ScrollView>
+
+        {/* ── In-App Diagnostic Console Modal ── */}
+        <Modal
+          visible={isDiagnosticVisible}
+          animationType="slide"
+          presentationStyle="fullScreen"
+          onRequestClose={() => setIsDiagnosticVisible(false)}
+        >
+          <CameraDiagnosticConsole onClose={() => setIsDiagnosticVisible(false)} />
+        </Modal>
       </SafeAreaView>
     </AppBackground>
   );
@@ -944,5 +1164,77 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.syne.bold,
     fontSize: 16.5,
     letterSpacing: 0.3,
+  },
+
+  // ── 8. Disconnect Button ──
+  disconnectBtnWrapper: {
+    width: '100%',
+    marginTop: 6,
+    marginBottom: 8,
+  },
+  disconnectBtnContainer: {
+    position: 'relative',
+    width: '100%',
+  },
+  disconnectShadowLayer: {
+    position: 'absolute',
+    borderRadius: 28,
+  },
+  disconnectBtnFace: {
+    height: 52,
+    borderRadius: 28,
+    borderWidth: 1.5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  disconnectBtnText: {
+    color: '#E5484D',
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    letterSpacing: 0.2,
+  },
+
+  // ── Diagnostics & Error Banner ──
+  actionColumn: {
+    marginLeft: 8,
+    gap: 6,
+    alignItems: 'flex-end',
+  },
+  diagBtnWrapper: {},
+  diagBtnFace: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+  },
+  diagBtnText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 12,
+  },
+
+  transferErrorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    padding: 12,
+    marginBottom: 12,
+  },
+  transferErrorTextContainer: {
+    flex: 1,
+    gap: 2,
+  },
+  transferErrorTitle: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
+    color: '#EF4444',
+  },
+  transferErrorDesc: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 11,
+    lineHeight: 15,
   },
 });

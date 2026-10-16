@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Animated, StyleSheet, StyleProp, ViewStyle } from 'react-native';
+import { View, Animated, StyleSheet, StyleProp, ViewStyle, Text } from 'react-native';
 import { Image } from 'expo-image';
 import type { ImageStyle, ImageContentFit } from 'expo-image';
+import { ImageOff } from 'lucide-react-native';
 import { useTheme } from '@/constants/theme';
 
 interface ImageWithSkeletonProps {
@@ -44,6 +45,9 @@ function resolveContentFit(resizeMode?: string): ImageContentFit {
  * Uses expo-image (Glide on Android) for decode-time downscaling
  * (allowDownscaling=true by default), which dramatically reduces native memory
  * usage compared to the core React Native Image component.
+ *
+ * When an image fails to decode (e.g. unsupported camera RAW like Sony .ARW),
+ * it displays a clean format badge placeholder instead of a blank tile.
  */
 export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
   source,
@@ -53,15 +57,34 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
 }) => {
   const { isDark } = useTheme();
   const [isLoaded, setIsLoaded] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const [shimmerAnim] = useState(() => new Animated.Value(0.35));
 
-  // Reset loaded state if uri changes (React pattern: adjust state on render, not via useEffect)
+  // Reset loaded & error state if uri changes (React pattern: adjust state on render, not via useEffect)
   const uriKey = source?.uri ?? '';
   const [prevUri, setPrevUri] = useState(uriKey);
   if (prevUri !== uriKey) {
     setPrevUri(uriKey);
     setIsLoaded(false);
+    setHasError(false);
   }
+
+  const extension = uriKey ? (uriKey.split('.').pop() || '').toUpperCase() : '';
+  const isRawFormat = [
+    'ARW',
+    'CR2',
+    'CR3',
+    'NEF',
+    'DNG',
+    'RW2',
+    'ORF',
+    'RAF',
+    'SRW',
+    'PEF',
+    'HIF',
+    'TIF',
+    'TIFF',
+  ].includes(extension);
 
   useEffect(() => {
     const filename = uriKey.split('/').pop() || 'unknown';
@@ -87,7 +110,7 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
       ]),
     );
 
-    if (!isLoaded) {
+    if (!isLoaded && !hasError) {
       animation.start();
     } else {
       shimmerAnim.stopAnimation();
@@ -96,12 +119,12 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
     return () => {
       animation.stop();
     };
-  }, [isLoaded, shimmerAnim]);
+  }, [isLoaded, hasError, shimmerAnim]);
 
   return (
     <View style={[styles.container, containerStyle]}>
       {/* Skeleton Shimmer Overlay */}
-      {!isLoaded && (
+      {!isLoaded && !hasError && (
         <Animated.View
           style={[
             StyleSheet.absoluteFill,
@@ -114,25 +137,62 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
         />
       )}
 
-      {/* expo-image — performs decode-time downscaling via Glide on Android */}
-      <Image
-        source={source}
-        style={[style, !isLoaded && styles.hiddenImage]}
-        contentFit={resolveContentFit(resizeMode)}
-        allowDownscaling={true}
-        cachePolicy="memory-disk"
-        onLoadStart={() => {
-          console.log(`[Diagnostic] Load Start | URI: ${uriKey.split('/').pop()}`);
-          setIsLoaded(false);
-        }}
-        onLoad={event => {
-          console.log(
-            `[Diagnostic] Load Complete | URI: ${uriKey.split('/').pop()} | Cache: ${event.cacheType}`,
-          );
-          setIsLoaded(true);
-        }}
-        onError={() => setIsLoaded(true)}
-      />
+      {/* Undecodable format placeholder (e.g. ARW RAW or corrupted image) */}
+      {hasError ? (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            styles.placeholderContainer,
+            { backgroundColor: isDark ? '#1C1C22' : '#EAE4DC' },
+          ]}
+        >
+          <ImageOff size={20} color={isDark ? '#8E8E93' : '#736B63'} strokeWidth={1.7} />
+          <View
+            style={[
+              styles.formatBadge,
+              { backgroundColor: isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)' },
+            ]}
+          >
+            <Text style={[styles.formatBadgeText, { color: isDark ? '#F5F5F7' : '#1C1C22' }]}>
+              {extension || 'RAW'}
+            </Text>
+          </View>
+          <Text
+            style={[styles.formatSubText, { color: isDark ? '#8E8E93' : '#736B63' }]}
+            numberOfLines={1}
+          >
+            {isRawFormat ? 'RAW format' : 'No preview'}
+          </Text>
+        </View>
+      ) : (
+        /* expo-image — performs decode-time downscaling via Glide on Android */
+        <Image
+          source={source}
+          style={[style, !isLoaded && styles.hiddenImage]}
+          contentFit={resolveContentFit(resizeMode)}
+          allowDownscaling={true}
+          cachePolicy="memory-disk"
+          onLoadStart={() => {
+            console.log(`[Diagnostic] Load Start | URI: ${uriKey.split('/').pop()}`);
+            setIsLoaded(false);
+            setHasError(false);
+          }}
+          onLoad={event => {
+            console.log(
+              `[Diagnostic] Load Complete | URI: ${uriKey.split('/').pop()} | Cache: ${event.cacheType}`,
+            );
+            setIsLoaded(true);
+            setHasError(false);
+          }}
+          onError={() => {
+            console.log(
+              `[Diagnostic] Load Error (undecodable or missing) | URI: ${uriKey.split('/').pop()}`,
+            );
+            setIsLoaded(true);
+            setHasError(true);
+          }}
+        />
+      )}
     </View>
   );
 };
@@ -147,5 +207,27 @@ const styles = StyleSheet.create({
   },
   hiddenImage: {
     opacity: 0,
+  },
+  placeholderContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 4,
+    zIndex: 2,
+  },
+  formatBadge: {
+    marginTop: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 3,
+  },
+  formatBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  formatSubText: {
+    fontSize: 8,
+    marginTop: 2,
+    fontWeight: '500',
   },
 });

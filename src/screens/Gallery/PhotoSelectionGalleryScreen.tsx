@@ -24,6 +24,8 @@ import {
   RefreshCw,
   Heart,
   Info,
+  AlertTriangle,
+  X,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -54,6 +56,112 @@ import {
   buildPhotoBatchesSync,
   buildGallerySections,
 } from '@/services/photoBatchingService';
+import { useCameraConnection, GalleryCameraState } from '@/services/cameraConnectionManager';
+import { addPhotoSkippedListener } from 'entephoto-camera';
+
+function isPhotoInUploadedSet(
+  photo: { id: string; filename?: string; status?: string },
+  uploadedSet: Set<string>,
+): boolean {
+  return (
+    photo.status === 'uploaded' ||
+    uploadedSet.has(photo.id) ||
+    Boolean(photo.filename && uploadedSet.has(photo.filename))
+  );
+}
+
+function getCameraStatusStyle(state: GalleryCameraState, isDark: boolean) {
+  switch (state) {
+    case 'connected':
+      return {
+        backgroundColor: isDark ? 'rgba(16, 185, 129, 0.2)' : '#D2F4E2',
+        borderColor: isDark ? '#34D399' : '#10B981',
+      };
+    case 'reconnecting':
+      return {
+        backgroundColor: isDark ? 'rgba(245, 158, 11, 0.2)' : '#FEF3C7',
+        borderColor: isDark ? '#FBBF24' : '#F59E0B',
+      };
+    case 'searching':
+    case 'connecting':
+      return {
+        backgroundColor: isDark ? 'rgba(14, 165, 233, 0.2)' : '#E0F2FE',
+        borderColor: isDark ? '#38BDF8' : '#0284C7',
+      };
+    case 'permission_required':
+      return {
+        backgroundColor: isDark ? 'rgba(245, 158, 11, 0.2)' : '#FEF3C7',
+        borderColor: isDark ? '#FBBF24' : '#F59E0B',
+      };
+    case 'disconnected':
+    default:
+      return {
+        backgroundColor: isDark ? 'rgba(239, 68, 68, 0.18)' : '#FEE2E2',
+        borderColor: isDark ? '#F87171' : '#EF4444',
+      };
+  }
+}
+
+function getCameraStatusTextColor(state: GalleryCameraState, isDark: boolean) {
+  switch (state) {
+    case 'connected':
+      return isDark ? '#6EE7B7' : '#065F46';
+    case 'reconnecting':
+    case 'permission_required':
+      return isDark ? '#FDE68A' : '#92400E';
+    case 'searching':
+    case 'connecting':
+      return isDark ? '#BAE6FD' : '#0369A1';
+    case 'disconnected':
+    default:
+      return isDark ? '#FCA5A5' : '#991B1B';
+  }
+}
+
+function getCameraStatusLabel(state: GalleryCameraState) {
+  switch (state) {
+    case 'connected':
+      return 'Connected';
+    case 'reconnecting':
+      return 'Reconnecting…';
+    case 'searching':
+      return 'Searching';
+    case 'connecting':
+      return 'Connecting';
+    case 'permission_required':
+      return 'Permission Required';
+    case 'disconnected':
+    default:
+      return 'Disconnected';
+  }
+}
+
+function renderCameraStatusIndicator(state: GalleryCameraState) {
+  if (state === 'searching' || state === 'connecting') {
+    return <ActivityIndicator size={9} color="#0284C7" style={{ marginRight: 6 }} />;
+  }
+  if (state === 'reconnecting') {
+    return <ActivityIndicator size={9} color="#F59E0B" style={{ marginRight: 6 }} />;
+  }
+  let dotColor = '#EF4444';
+  if (state === 'connected') {
+    dotColor = '#10B981';
+  } else if (state === 'permission_required') {
+    dotColor = '#F59E0B';
+  }
+
+  return (
+    <View
+      style={{
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        backgroundColor: dotColor,
+        marginRight: 6,
+      }}
+    />
+  );
+}
 
 export type PhotoStatus = 'new' | 'marked' | 'uploaded';
 
@@ -110,6 +218,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     bytePercentage?: number;
   } | null>(null);
   const [uploadingPhotoIds, setUploadingPhotoIds] = useState<Set<string>>(new Set());
+  const [uploadedPhotoIds, setUploadedPhotoIds] = useState<Set<string>>(new Set());
+  const uploadedPhotoIdsRef = React.useRef<Set<string>>(new Set());
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
   const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
   const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
@@ -120,8 +230,172 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     photosRef.current = photos;
   }, [photos]);
 
+  // Authoritative camera connection state from native manager
+  const {
+    connectionState: cameraConnectionState,
+    cameraModel,
+    startSearch: startCameraSearch,
+    reconcile: reconcileCameraState,
+  } = useCameraConnection();
+
+  // Keep camera discovery active while on Gallery screen
+  useEffect(() => {
+    startCameraSearch();
+  }, [startCameraSearch]);
+
+  // Track if a camera connection has ever been established in this session.
+  // This prevents showing the disconnect warning during normal initial discovery.
+  const [prevConnectionState, setPrevConnectionState] = useState(cameraConnectionState);
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(cameraConnectionState === 'connected');
+
+  if (cameraConnectionState !== prevConnectionState) {
+    setPrevConnectionState(cameraConnectionState);
+    if (cameraConnectionState === 'connected') {
+      setHasConnectedOnce(true);
+    }
+  }
+
+  // Non-blocking disconnect banner is visible only if we lost an established connection
+  const isDisconnectBannerVisible =
+    hasConnectedOnce &&
+    (cameraConnectionState === 'disconnected' ||
+      cameraConnectionState === 'reconnecting' ||
+      cameraConnectionState === 'searching' ||
+      cameraConnectionState === 'permission_required');
+
+  const isRetryingCamera =
+    cameraConnectionState === 'connecting' || cameraConnectionState === 'reconnecting';
+
+  // Safe retry connection handler: uses existing connection manager reconciliation
+  const handleRetryCameraConnection = useCallback(() => {
+    if (isRetryingCamera) return;
+    console.log('[Gallery] User tapped Retry Camera Connection — reconciling state');
+    try {
+      reconcileCameraState();
+    } catch (e) {
+      console.warn('[Gallery] reconcileCameraState failed, calling startCameraSearch:', e);
+      startCameraSearch();
+    }
+  }, [isRetryingCamera, reconcileCameraState, startCameraSearch]);
+
+  // Non-blocking notification for skipped unsupported camera files (e.g. Sony .ARW)
+  const [skippedNotice, setSkippedNotice] = useState<{
+    id: string;
+    title: string;
+    message: string;
+    count: number;
+  } | null>(null);
+  const skippedDismissTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleDismissSkippedNotice = useCallback(() => {
+    if (skippedDismissTimeoutRef.current) {
+      clearTimeout(skippedDismissTimeoutRef.current);
+      skippedDismissTimeoutRef.current = null;
+    }
+    setSkippedNotice(null);
+  }, []);
+
+  useEffect(() => {
+    let sub: ReturnType<typeof addPhotoSkippedListener> | null = null;
+    try {
+      sub = addPhotoSkippedListener(event => {
+        console.log('[Gallery] Camera photo skipped (unsupported format):', event);
+        const filename = event.filename?.trim();
+        const ext = (
+          event.extension?.trim() || (filename ? filename.split('.').pop() : '')
+        )?.toUpperCase();
+        const isRaw = [
+          'ARW',
+          'CR2',
+          'CR3',
+          'NEF',
+          'DNG',
+          'RW2',
+          'ORF',
+          'RAF',
+          'SRW',
+          'PEF',
+        ].includes(ext || '');
+
+        const title = isRaw ? 'RAW file not imported' : 'Unsupported file not imported';
+        const fileLabel = filename || 'File';
+        const baseMessage = `${fileLabel} was skipped. EntePhoto currently imports JPEG files only.`;
+
+        setSkippedNotice(prev => {
+          const newCount = prev ? prev.count + 1 : 1;
+          const displayMessage =
+            newCount > 1
+              ? `${fileLabel} and ${newCount - 1} other unsupported file${newCount > 2 ? 's were' : ' was'} skipped. EntePhoto currently imports JPEG files only.`
+              : baseMessage;
+
+          return {
+            id: `${Date.now()}-${Math.random()}`,
+            title: newCount > 1 ? `${newCount} unsupported files skipped` : title,
+            message: displayMessage,
+            count: newCount,
+          };
+        });
+
+        if (skippedDismissTimeoutRef.current) {
+          clearTimeout(skippedDismissTimeoutRef.current);
+        }
+        skippedDismissTimeoutRef.current = setTimeout(() => {
+          setSkippedNotice(null);
+          skippedDismissTimeoutRef.current = null;
+        }, 6000);
+      });
+    } catch (e) {
+      console.warn('[Gallery] Failed to register addPhotoSkippedListener:', e);
+    }
+
+    return () => {
+      sub?.remove();
+      if (skippedDismissTimeoutRef.current) {
+        clearTimeout(skippedDismissTimeoutRef.current);
+        skippedDismissTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleCameraIndicatorPress = useCallback(() => {
+    if (cameraConnectionState === 'connected') {
+      navigation.navigate('CameraConnected', {
+        eventId,
+        eventTitle,
+        eventDate: route.params?.eventDate,
+        eventCategory,
+        coverImage: route.params?.coverImage,
+        cameraModel: cameraModel || route.params?.cameraModel || 'Sony Camera',
+        photoCount: photos.length,
+      });
+    } else if (cameraConnectionState === 'permission_required') {
+      startCameraSearch();
+    } else {
+      navigation.navigate('CameraConnect', {
+        eventId,
+        eventTitle,
+        eventDate: route.params?.eventDate,
+        eventCategory,
+        coverImage: route.params?.coverImage,
+      });
+    }
+  }, [
+    cameraConnectionState,
+    navigation,
+    eventId,
+    eventTitle,
+    route.params?.eventDate,
+    route.params?.coverImage,
+    route.params?.cameraModel,
+    eventCategory,
+    cameraModel,
+    photos.length,
+    startCameraSearch,
+  ]);
+
   // All Upload Queue & Session State
   const allUploadQueueRef = React.useRef<string[]>([]);
+  const allUploadSessionProcessedRef = React.useRef<number>(0);
   const allUploadFailedIdsRef = React.useRef<Set<string>>(new Set());
   const isAllUploadActiveRef = React.useRef(false);
   const [isAllUploadActive, setIsAllUploadActive] = useState(false);
@@ -143,6 +417,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         currentUploadControlRef.current = null;
       }
       allUploadQueueRef.current = [];
+      allUploadSessionProcessedRef.current = 0;
       failedIds.clear();
       isAllUploadWorkerRunningRef.current = false;
       currentUploadingPhotoIdRef.current = null;
@@ -187,6 +462,36 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     });
   }, [favoritePhotoIds, isFavoritesLoaded]);
 
+  // Restore uploaded photo IDs from local storage on mount (scoped by eventId)
+  useEffect(() => {
+    let isMounted = true;
+    async function loadUploadedPhotos() {
+      if (!eventId) return;
+      try {
+        const savedKeys = await storageService.getUploadedPhotoKeys(eventId);
+        if (isMounted && savedKeys && savedKeys.length > 0) {
+          const keySet = new Set(savedKeys);
+          uploadedPhotoIdsRef.current = keySet;
+          setUploadedPhotoIds(keySet);
+
+          // Synchronously reflect uploaded status on already-loaded photos
+          photosRef.current = photosRef.current.map(p =>
+            isPhotoInUploadedSet(p, keySet) ? { ...p, status: 'uploaded' } : p,
+          );
+          setPhotos(prev =>
+            prev.map(p => (isPhotoInUploadedSet(p, keySet) ? { ...p, status: 'uploaded' } : p)),
+          );
+        }
+      } catch (error) {
+        console.error('[Gallery] Failed to load uploaded photos from storage:', error);
+      }
+    }
+    loadUploadedPhotos();
+    return () => {
+      isMounted = false;
+    };
+  }, [eventId]);
+
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
     let isMounted = true;
@@ -195,7 +500,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     scanDcimEntephotoPhotos()
       .then(scanned => {
         if (!isMounted) return;
-        setPhotos(scanned);
+        const uploadedSet = uploadedPhotoIdsRef.current;
+        const mapped = scanned.map(p =>
+          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+        );
+        photosRef.current = mapped;
+        setPhotos(mapped);
         setIsInitialLoading(false);
       })
       .catch(err => {
@@ -208,59 +518,76 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
       if (!isMounted) return;
       setIsInitialLoading(false);
-      setPhotos(prevPhotos => {
-        if (prevPhotos.length === 0) {
-          return dcimPhotos;
-        }
 
-        // Preserve user's local selections and object references across scans
+      // 1. Build merged list synchronously against current photosRef.current
+      const currentPhotos = photosRef.current;
+      const uploadedSet = uploadedPhotoIdsRef.current;
+      let merged: GalleryPhotoItem[];
+
+      if (currentPhotos.length === 0) {
+        merged = dcimPhotos.map(p =>
+          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+        );
+      } else {
         const prevMap = new Map<string, GalleryPhotoItem>();
-        for (const p of prevPhotos) {
+        for (const p of currentPhotos) {
           prevMap.set(p.id, p);
           if (p.uri) {
             prevMap.set(p.uri, p);
           }
         }
 
-        const merged = dcimPhotos.map(item => {
+        merged = dcimPhotos.map(item => {
           const existing = prevMap.get(item.id) || prevMap.get(item.uri);
+          const isUploaded =
+            isPhotoInUploadedSet(item, uploadedSet) || existing?.status === 'uploaded';
+
           if (existing) {
-            // Keep exactly the same object reference to prevent re-renders
+            if (isUploaded && existing.status !== 'uploaded') {
+              return { ...existing, status: 'uploaded' };
+            }
             return existing;
+          }
+          if (isUploaded) {
+            return { ...item, status: 'uploaded' };
           }
           return item;
         });
+      }
 
-        // Ensure array identity is preserved if strictly equal
-        if (
-          merged.length === prevPhotos.length &&
-          merged.every((item, i) => item === prevPhotos[i])
-        ) {
-          return prevPhotos;
-        }
+      // Check if anything actually changed
+      const isSame =
+        merged.length === currentPhotos.length &&
+        merged.every((item, i) => item === currentPhotos[i]);
 
-        // If All Upload is active, append newly arriving unuploaded photos to the queue
-        if (isAllUploadActiveRef.current) {
-          let hasNewQueueItems = false;
-          merged.forEach(p => {
-            if (
-              p.status !== 'uploaded' &&
-              !allUploadFailedIdsRef.current.has(p.id) &&
-              !allUploadQueueRef.current.includes(p.id) &&
-              currentUploadingPhotoIdRef.current !== p.id
-            ) {
-              console.log(`[AllUpload] Appending new arrival to queue: ${p.filename || p.id}`);
-              allUploadQueueRef.current.push(p.id);
-              hasNewQueueItems = true;
-            }
-          });
-          if (hasNewQueueItems && !isAllUploadPausedRef.current) {
-            processAllUploadQueueRef.current?.();
+      if (!isSame) {
+        // Immediately synchronize photosRef.current before queueing or triggering upload worker
+        photosRef.current = merged;
+        setPhotos(merged);
+      }
+
+      // 2. OUTSIDE setPhotos updater: if All Upload is active, queue newly arrived unuploaded photos
+      if (isAllUploadActiveRef.current) {
+        let hasNewQueueItems = false;
+        merged.forEach(p => {
+          const isUploaded = isPhotoInUploadedSet(p, uploadedSet);
+
+          if (
+            !isUploaded &&
+            !allUploadFailedIdsRef.current.has(p.id) &&
+            !allUploadQueueRef.current.includes(p.id) &&
+            currentUploadingPhotoIdRef.current !== p.id
+          ) {
+            console.log(`[AllUpload] Appending new arrival to queue: ${p.filename || p.id}`);
+            allUploadQueueRef.current.push(p.id);
+            hasNewQueueItems = true;
           }
-        }
+        });
 
-        return merged;
-      });
+        if (hasNewQueueItems && !isAllUploadPausedRef.current) {
+          processAllUploadQueueRef.current?.();
+        }
+      }
     }, 2000);
 
     return () => {
@@ -274,7 +601,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setIsRefreshing(true);
     try {
       const scanned = await scanDcimEntephotoPhotos();
-      setPhotos(scanned);
+      const uploadedSet = uploadedPhotoIdsRef.current;
+      const mapped = scanned.map(p =>
+        isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+      );
+      photosRef.current = mapped;
+      setPhotos(mapped);
     } finally {
       setIsRefreshing(false);
     }
@@ -290,20 +622,22 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const favoriteCount = favoritePhotoIds.size;
 
   const newCount = useMemo(() => {
-    return photos.filter(p => p.status === 'new').length;
-  }, [photos]);
+    return photos.filter(p => p.status === 'new' && !isPhotoInUploadedSet(p, uploadedPhotoIds))
+      .length;
+  }, [photos, uploadedPhotoIds]);
 
   const markedCount = useMemo(() => {
-    return photos.filter(p => p.status === 'marked').length;
-  }, [photos]);
+    return photos.filter(p => p.status === 'marked' && !isPhotoInUploadedSet(p, uploadedPhotoIds))
+      .length;
+  }, [photos, uploadedPhotoIds]);
 
   const uploadedCount = useMemo(() => {
-    return photos.filter(p => p.status === 'uploaded').length;
-  }, [photos]);
+    return photos.filter(p => isPhotoInUploadedSet(p, uploadedPhotoIds)).length;
+  }, [photos, uploadedPhotoIds]);
 
   const unuploadedCount = useMemo(() => {
-    return photos.filter(p => p.status !== 'uploaded').length;
-  }, [photos]);
+    return photos.filter(p => !isPhotoInUploadedSet(p, uploadedPhotoIds)).length;
+  }, [photos, uploadedPhotoIds]);
 
   // Filtered Photo List (Only recompute on selection/favorite changes when activeFilter is 'Marked' or 'Favorites')
   const filteredPhotos = useMemo(() => {
@@ -313,12 +647,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       case 'Marked':
         return photos.filter(p => p.status === 'marked');
       case 'Uploaded':
-        return photos.filter(p => p.status === 'uploaded');
+        return photos.filter(p => isPhotoInUploadedSet(p, uploadedPhotoIds));
       case 'All':
       default:
         return photos;
     }
-  }, [photos, activeFilter, favoritePhotoIds]);
+  }, [photos, activeFilter, favoritePhotoIds, uploadedPhotoIds]);
 
   /**
    * Gallery batches — computed from date-based photo batching.
@@ -358,7 +692,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const togglePhotoSelection = useCallback(
     (id: string) => {
       const targetPhoto = photos.find(p => p.id === id);
-      if (targetPhoto && targetPhoto.status === 'uploaded') {
+      if (targetPhoto && isPhotoInUploadedSet(targetPhoto, uploadedPhotoIds)) {
         return; // Uploaded photos cannot be selected for upload
       }
 
@@ -372,27 +706,32 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         return next;
       });
     },
-    [photos],
+    [photos, uploadedPhotoIds],
   );
 
   // Toggle Select All photos within a specific batch (unrestricted selection count)
-  const toggleBatchSelection = useCallback((batch: RuntimeBatch) => {
-    setSelectedPhotoIds(prev => {
-      const selectableIds = batch.photos.filter(p => p.status !== 'uploaded').map(p => p.id);
-      if (selectableIds.length === 0) return prev;
+  const toggleBatchSelection = useCallback(
+    (batch: RuntimeBatch) => {
+      setSelectedPhotoIds(prev => {
+        const selectableIds = batch.photos
+          .filter(p => !isPhotoInUploadedSet(p, uploadedPhotoIds))
+          .map(p => p.id);
+        if (selectableIds.length === 0) return prev;
 
-      const allSelected = selectableIds.every(id => prev.has(id));
-      const next = new Set(prev);
-      selectableIds.forEach(id => {
-        if (allSelected) {
-          next.delete(id);
-        } else {
-          next.add(id);
-        }
+        const allSelected = selectableIds.every(id => prev.has(id));
+        const next = new Set(prev);
+        selectableIds.forEach(id => {
+          if (allSelected) {
+            next.delete(id);
+          } else {
+            next.add(id);
+          }
+        });
+        return next;
       });
-      return next;
-    });
-  }, []);
+    },
+    [uploadedPhotoIds],
+  );
 
   // Open Gallery Actions Sheet
   const handleMoreOptions = useCallback(() => {
@@ -404,35 +743,37 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setSelectedPhotoIds(prev => {
       const next = new Set(prev);
       filteredPhotos.forEach(p => {
-        if (p.status !== 'uploaded') {
+        if (!isPhotoInUploadedSet(p, uploadedPhotoIds)) {
           next.add(p.id);
         }
       });
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [filteredPhotos]);
+  }, [filteredPhotos, uploadedPhotoIds]);
 
   // Select All New Photos (unrestricted selection count)
   const handleSelectAllNew = useCallback(() => {
     setSelectedPhotoIds(prev => {
       const next = new Set(prev);
       filteredPhotos.forEach(p => {
-        if (p.status === 'new') {
+        if (p.status === 'new' && !isPhotoInUploadedSet(p, uploadedPhotoIds)) {
           next.add(p.id);
         }
       });
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [filteredPhotos]);
+  }, [filteredPhotos, uploadedPhotoIds]);
 
   // Invert Selection (unrestricted selection count)
   const handleInvertSelection = useCallback(() => {
     setSelectedPhotoIds(prev => {
       const next = new Set(prev);
       filteredPhotos.forEach(p => {
-        if (p.status === 'uploaded') return;
+        if (isPhotoInUploadedSet(p, uploadedPhotoIds)) {
+          return;
+        }
         if (prev.has(p.id)) {
           next.delete(p.id);
         } else {
@@ -442,7 +783,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return next;
     });
     setIsActionsModalVisible(false);
-  }, [filteredPhotos]);
+  }, [filteredPhotos, uploadedPhotoIds]);
 
   // Clear Selection
   const handleClearSelection = useCallback(() => {
@@ -527,6 +868,60 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   // ── ALL UPLOAD QUEUE WORKER & CONTROLLER ──
 
+  // Shared handler for confirmed upload success (used by All Upload, Manual Batch, and Single Photo)
+  const handlePhotoUploadSuccess = useCallback(
+    (photo: GalleryPhotoItem) => {
+      const photoId = photo.id;
+
+      // 1. Update authoritative uploadedPhotoIds ref and reactive state
+      uploadedPhotoIdsRef.current.add(photoId);
+      if (photo.filename) {
+        uploadedPhotoIdsRef.current.add(photo.filename);
+      }
+      setUploadedPhotoIds(prev => {
+        const next = new Set(prev);
+        next.add(photoId);
+        if (photo.filename) {
+          next.add(photo.filename);
+        }
+        return next;
+      });
+
+      // 2. Persist to storage scoped by eventId
+      if (eventId) {
+        const keysToPersist = photo.filename ? [photoId, photo.filename] : [photoId];
+        storageService
+          .markPhotosUploaded(eventId, keysToPersist)
+          .catch(err => console.error('[Gallery] Failed to persist uploaded status:', err));
+      }
+
+      // 3. Update photosRef.current and setPhotos
+      photosRef.current = photosRef.current.map(p =>
+        p.id === photo.id || p.uri === photo.uri
+          ? { ...p, selected: false, status: 'uploaded' }
+          : p,
+      );
+      setPhotos(prev =>
+        prev.map(p =>
+          p.id === photo.id || p.uri === photo.uri
+            ? { ...p, selected: false, status: 'uploaded' }
+            : p,
+        ),
+      );
+
+      // 4. Deselect if it was selected
+      setSelectedPhotoIds(prev => {
+        if (prev.has(photo.id)) {
+          const next = new Set(prev);
+          next.delete(photo.id);
+          return next;
+        }
+        return prev;
+      });
+    },
+    [eventId],
+  );
+
   // Process the All Upload queue sequentially one photo at a time
   const processAllUploadQueue = useCallback(async () => {
     if (isAllUploadWorkerRunningRef.current || !isAllUploadActiveRef.current) {
@@ -548,8 +943,17 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         const nextPhotoId = allUploadQueueRef.current.shift()!;
         const photo = photosRef.current.find(p => p.id === nextPhotoId);
 
-        // Skip if photo was removed or already uploaded
-        if (!photo || photo.status === 'uploaded') {
+        // If photo cannot be resolved yet, preserve it in the queue for the next cycle
+        if (!photo) {
+          console.warn(
+            `[AllUpload] Photo ${nextPhotoId} not resolved in photosRef. Preserving in queue.`,
+          );
+          allUploadQueueRef.current.unshift(nextPhotoId);
+          break;
+        }
+
+        // Skip if already uploaded
+        if (photo.status === 'uploaded') {
           continue;
         }
 
@@ -561,8 +965,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
         progressAnim.setValue(0);
         setUploadProgress({
-          current: 1,
-          total: allUploadQueueRef.current.length + 1,
+          current: allUploadSessionProcessedRef.current + 1,
+          total: allUploadSessionProcessedRef.current + allUploadQueueRef.current.length + 1,
           filename: photo.filename,
           bytePercentage: 0,
         });
@@ -600,22 +1004,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           setUploadProgress(prev => (prev ? { ...prev, bytePercentage: 100 } : prev));
           console.log(`[AllUpload] Photo ${photo.filename || photo.id} uploaded successfully.`);
 
-          setPhotos(prev =>
-            prev.map(p =>
-              p.id === photo.id || p.uri === photo.uri
-                ? { ...p, selected: false, status: 'uploaded' }
-                : p,
-            ),
-          );
-
-          setSelectedPhotoIds(prev => {
-            if (prev.has(photo.id)) {
-              const next = new Set(prev);
-              next.delete(photo.id);
-              return next;
-            }
-            return prev;
-          });
+          allUploadSessionProcessedRef.current += 1;
+          handlePhotoUploadSuccess(photo);
         } catch (err: any) {
           if (isUploadCancelledError(err) || cancelControl.isCancelled) {
             console.log(`[AllUpload] Photo ${photo.filename || photo.id} upload cancelled.`);
@@ -664,7 +1054,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         processAllUploadQueueRef.current?.();
       }
     }
-  }, [eventId, progressAnim]);
+  }, [eventId, handlePhotoUploadSuccess, progressAnim]);
 
   // Keep processAllUploadQueueRef updated with the latest callback reference
   useEffect(() => {
@@ -692,9 +1082,15 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setIsAllUploadActive(true);
     isAllUploadPausedRef.current = false;
     setIsAllUploadPaused(false);
+    allUploadSessionProcessedRef.current = 0;
 
     // Initial population: every photo in the entire gallery where status !== 'uploaded'
-    const unuploaded = photosRef.current.filter(p => p.status !== 'uploaded');
+    const unuploaded = photosRef.current.filter(
+      p =>
+        p.status !== 'uploaded' &&
+        !uploadedPhotoIdsRef.current.has(p.id) &&
+        (!p.filename || !uploadedPhotoIdsRef.current.has(p.filename)),
+    );
     allUploadFailedIdsRef.current.clear();
     allUploadQueueRef.current = unuploaded.map(p => p.id);
 
@@ -845,19 +1241,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               successCount++;
               console.log(`[PhotoGallery] Photo ${photo.filename} uploaded successfully.`);
 
-              // Mark individual photo as uploaded immediately upon success
-              setPhotos(prev =>
-                prev.map(p =>
-                  p.id === photo.id || p.uri === photo.uri
-                    ? { ...p, selected: false, status: 'uploaded' }
-                    : p,
-                ),
-              );
-              setSelectedPhotoIds(prev => {
-                const next = new Set(prev);
-                next.delete(photo.id);
-                return next;
-              });
+              // Mark individual photo as uploaded immediately upon success via shared handler
+              handlePhotoUploadSuccess(photo);
             } catch (err: any) {
               const errorMsg = err?.message || 'Upload failed';
               console.error(`[PhotoGallery] Upload error for ${photo.filename}:`, errorMsg);
@@ -914,7 +1299,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         await runUploads();
       }
     },
-    [eventId, eventTitle, progressAnim],
+    [eventId, eventTitle, handlePhotoUploadSuccess, progressAnim],
   );
 
   // Upload Selected Photos (Gallery Bulk Upload)
@@ -922,7 +1307,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     if (isUploadingRef.current) return;
 
     const selectedPhotos = photos.filter(
-      p => selectedPhotoIds.has(p.id) && p.status !== 'uploaded',
+      p =>
+        selectedPhotoIds.has(p.id) &&
+        p.status !== 'uploaded' &&
+        !uploadedPhotoIds.has(p.id) &&
+        (!p.filename || !uploadedPhotoIds.has(p.filename)),
     );
 
     if (selectedPhotos.length === 0) {
@@ -934,7 +1323,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
 
     executeUploadBatch(selectedPhotos, true);
-  }, [photos, selectedPhotoIds, executeUploadBatch]);
+  }, [photos, selectedPhotoIds, uploadedPhotoIds, executeUploadBatch]);
 
   // Upload Trigger from Action Sheet
   const handleUploadFromSheet = useCallback(() => {
@@ -951,11 +1340,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // Upload Single Photo (Thin wrapper for the viewer)
   const handleUploadSinglePhoto = useCallback(
     (photo: GalleryPhotoItem) => {
-      if (photo.status === 'uploaded') return;
+      if (isPhotoInUploadedSet(photo, uploadedPhotoIds)) {
+        return;
+      }
       // Do not show an alert prompt when uploading a single photo directly from the viewer
       executeUploadBatch([photo], false);
     },
-    [executeUploadBatch],
+    [executeUploadBatch, uploadedPhotoIds],
   );
 
   // Floating Dock Animation & Favorite Logic
@@ -1018,11 +1409,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           section={section}
           isDark={isDark}
           selectedPhotoIds={selectedPhotoIds}
+          uploadedPhotoIds={uploadedPhotoIds}
           onToggleBatchSelection={toggleBatchSelection}
         />
       );
     },
-    [isDark, selectedPhotoIds, toggleBatchSelection],
+    [isDark, selectedPhotoIds, uploadedPhotoIds, toggleBatchSelection],
   );
 
   // ── Render: Section Item (3-Column Grid Row for all batch photos) ──────────
@@ -1036,6 +1428,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           uploadingPhotoIds={uploadingPhotoIds}
           selectedPhotoIds={selectedPhotoIds}
           favoritePhotoIds={favoritePhotoIds}
+          uploadedPhotoIds={uploadedPhotoIds}
           onOpenViewer={flatIndex => {
             setViewerInitialIndex(flatIndex);
             setViewerVisible(true);
@@ -1044,7 +1437,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         />
       );
     },
-    [uploadingPhotoIds, selectedPhotoIds, favoritePhotoIds, togglePhotoSelection],
+    [uploadingPhotoIds, selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, togglePhotoSelection],
   );
 
   return (
@@ -1080,21 +1473,30 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             </Text>
           </View>
 
-          {/* Right Header Actions: Connected Badge & More Menu */}
+          {/* Right Header Actions: Camera Status Badge & More Menu */}
           <View style={styles.headerRightActions}>
-            {/* Pill Connected Status Badge */}
-            <View
+            {/* Dynamic Camera Connection Status Pill */}
+            <TouchableOpacity
+              activeOpacity={0.75}
+              onPress={handleCameraIndicatorPress}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               style={[
                 styles.connectedStatusPill,
-                {
-                  backgroundColor: '#D2F4E2',
-                  borderColor: isDark ? '#34D399' : '#161616',
-                },
+                getCameraStatusStyle(cameraConnectionState, isDark),
               ]}
+              accessibilityRole="button"
+              accessibilityLabel={`Camera status: ${getCameraStatusLabel(cameraConnectionState)}`}
             >
-              <View style={styles.statusGreenDot} />
-              <Text style={styles.connectedPillLabel}>Connected</Text>
-            </View>
+              {renderCameraStatusIndicator(cameraConnectionState)}
+              <Text
+                style={[
+                  styles.connectedPillLabel,
+                  { color: getCameraStatusTextColor(cameraConnectionState, isDark) },
+                ]}
+              >
+                {getCameraStatusLabel(cameraConnectionState)}
+              </Text>
+            </TouchableOpacity>
 
             {/* More Options Button */}
             <TouchableOpacity
@@ -1183,6 +1585,113 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           />
         </View>
 
+        {/* ── UNSUPPORTED FORMAT SKIPPED BANNER (Non-blocking, inline) ── */}
+        {skippedNotice && (
+          <View style={styles.skippedBannerWrapper}>
+            <View
+              style={[
+                styles.skippedBannerFace,
+                {
+                  backgroundColor: isDark ? '#261F18' : '#FFF9F2',
+                  borderColor: isDark ? '#5C3E1B' : '#E0922F',
+                },
+              ]}
+            >
+              <View style={styles.skippedBannerLeft}>
+                <Info
+                  size={18}
+                  color={isDark ? '#FBBF24' : '#D97706'}
+                  strokeWidth={2.4}
+                  style={styles.skippedBannerIcon}
+                />
+                <View style={styles.skippedBannerTextContainer}>
+                  <Text
+                    style={[styles.skippedBannerTitle, { color: isDark ? '#FDF4DC' : '#1C1917' }]}
+                  >
+                    {skippedNotice.title}
+                  </Text>
+                  <Text
+                    style={[styles.skippedBannerBody, { color: isDark ? '#E5D5B8' : '#78716C' }]}
+                  >
+                    {skippedNotice.message}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                onPress={handleDismissSkippedNotice}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                activeOpacity={0.75}
+                style={styles.skippedDismissButton}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss notice"
+              >
+                <X size={16} color={isDark ? '#E5D5B8' : '#78716C'} strokeWidth={2} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* ── CAMERA DISCONNECTION PROMPT BANNER (Non-blocking, inline) ── */}
+        {isDisconnectBannerVisible && (
+          <View style={styles.disconnectBannerWrapper}>
+            <View
+              style={[
+                styles.disconnectBannerFace,
+                {
+                  backgroundColor: isDark ? '#2A1515' : '#FFF0ED',
+                  borderColor: isDark ? '#5E2020' : '#FF6B4A',
+                },
+              ]}
+            >
+              <View style={styles.disconnectBannerLeft}>
+                <AlertTriangle
+                  size={18}
+                  color="#FF6B4A"
+                  strokeWidth={2.4}
+                  style={styles.disconnectBannerIcon}
+                />
+                <View style={styles.disconnectBannerTextContainer}>
+                  <Text
+                    style={[
+                      styles.disconnectBannerTitle,
+                      { color: isDark ? '#F4F4F5' : '#161616' },
+                    ]}
+                  >
+                    {cameraConnectionState === 'reconnecting'
+                      ? 'Camera reconnecting…'
+                      : 'Camera disconnected'}
+                  </Text>
+                  <Text
+                    style={[styles.disconnectBannerBody, { color: isDark ? '#FFA384' : '#7A7571' }]}
+                  >
+                    Reconnect the camera cable. Your Gallery and ongoing uploads will remain
+                    available.
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                onPress={handleRetryCameraConnection}
+                disabled={isRetryingCamera}
+                activeOpacity={0.75}
+                style={[
+                  styles.disconnectRetryButton,
+                  { backgroundColor: isDark ? '#E5484D' : '#161616' },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Retry camera connection"
+              >
+                {isRetryingCamera ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.disconnectRetryText}>Retry</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* ── TOP LOADING SPINNER (Visible during initial photo scanning) ── */}
         {isInitialLoading && (
           <View style={styles.topSpinnerContainer}>
@@ -1194,8 +1703,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <SectionList<GallerySectionRow, GalleryBatchSection>
           sections={gallerySections}
           extraData={useMemo(
-            () => [selectedPhotoIds, favoritePhotoIds, isInitialLoading],
-            [selectedPhotoIds, favoritePhotoIds, isInitialLoading],
+            () => [selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, isInitialLoading],
+            [selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, isInitialLoading],
           )}
           keyExtractor={item => item.rowKey}
           renderItem={renderSectionItem}
@@ -1632,6 +2141,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onToggleMark={togglePhotoSelection}
           onToggleFavorite={toggleFavoritePhoto}
           favoritePhotoIds={favoritePhotoIds}
+          uploadedPhotoIds={uploadedPhotoIds}
           onUploadPhoto={handleUploadSinglePhoto}
           onDeletePhoto={handleDeletePhoto}
           isDark={isDark}
@@ -1673,6 +2183,7 @@ const MemoizedPhotoTile = React.memo(
     isUploading,
     isSelected,
     isFavorite,
+    isUploaded,
     onOpenViewer,
     onToggleSelection,
   }: {
@@ -1681,11 +2192,12 @@ const MemoizedPhotoTile = React.memo(
     isUploading: boolean;
     isSelected: boolean;
     isFavorite: boolean;
+    isUploaded: boolean;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
-    // isSelected comes from props
-    const isUploaded = item.status === 'uploaded';
+    // effectiveUploaded considers both authoritative prop and item.status
+    const effectiveUploaded = isUploaded || item.status === 'uploaded';
 
     return (
       <View style={styles.gridCellContainer}>
@@ -1694,7 +2206,7 @@ const MemoizedPhotoTile = React.memo(
           style={({ pressed }) => [
             styles.photoTileWrapper,
             isSelected && styles.photoTileSelectedBorder,
-            isUploaded && styles.photoTileUploadedDimmed,
+            effectiveUploaded && styles.photoTileUploadedDimmed,
             {
               transform: [{ scale: pressed ? 0.96 : 1 }],
             },
@@ -1724,12 +2236,12 @@ const MemoizedPhotoTile = React.memo(
           <Pressable
             onPress={e => {
               e.stopPropagation();
-              if (!isUploading && !isUploaded) {
+              if (!isUploading && !effectiveUploaded) {
                 onToggleSelection(item.id);
               }
             }}
             hitSlop={10}
-            disabled={isUploading || isUploaded}
+            disabled={isUploading || effectiveUploaded}
             style={styles.selectionIndicatorContainer}
             accessibilityRole="checkbox"
             accessibilityState={{ checked: isSelected }}
@@ -1739,7 +2251,7 @@ const MemoizedPhotoTile = React.memo(
               <View style={styles.uploadingSpinnerBadge}>
                 <ActivityIndicator size={11} color="#FFFFFF" />
               </View>
-            ) : isUploaded ? (
+            ) : effectiveUploaded ? (
               <View style={styles.uploadedCloudBadge}>
                 <Cloud size={13} color="#FFFFFF" strokeWidth={2.4} />
               </View>
@@ -1763,6 +2275,7 @@ const MemoizedPhotoTile = React.memo(
       prevProps.isUploading === nextProps.isUploading &&
       prevProps.isSelected === nextProps.isSelected &&
       prevProps.isFavorite === nextProps.isFavorite &&
+      prevProps.isUploaded === nextProps.isUploaded &&
       prevProps.flatIndex === nextProps.flatIndex
     );
   },
@@ -1774,6 +2287,7 @@ const MemoizedGridRow = React.memo(
     uploadingPhotoIds,
     selectedPhotoIds,
     favoritePhotoIds,
+    uploadedPhotoIds,
     onOpenViewer,
     onToggleSelection,
   }: {
@@ -1781,23 +2295,29 @@ const MemoizedGridRow = React.memo(
     uploadingPhotoIds: Set<string>;
     selectedPhotoIds: Set<string>;
     favoritePhotoIds: Set<string>;
+    uploadedPhotoIds: Set<string>;
     onOpenViewer: (idx: number) => void;
     onToggleSelection: (id: string) => void;
   }) => {
     return (
       <View style={styles.photoRowGroup}>
-        {item.photos.map(({ photo, photoIndex }) => (
-          <MemoizedPhotoTile
-            key={photo.id}
-            item={photo}
-            flatIndex={photoIndex}
-            isUploading={uploadingPhotoIds.has(photo.id)}
-            isSelected={selectedPhotoIds.has(photo.id)}
-            isFavorite={favoritePhotoIds.has(photo.id)}
-            onOpenViewer={onOpenViewer}
-            onToggleSelection={onToggleSelection}
-          />
-        ))}
+        {item.photos.map(({ photo, photoIndex }) => {
+          const isUploaded = isPhotoInUploadedSet(photo, uploadedPhotoIds);
+
+          return (
+            <MemoizedPhotoTile
+              key={photo.id}
+              item={photo}
+              flatIndex={photoIndex}
+              isUploading={uploadingPhotoIds.has(photo.id)}
+              isSelected={selectedPhotoIds.has(photo.id)}
+              isFavorite={favoritePhotoIds.has(photo.id)}
+              isUploaded={isUploaded}
+              onOpenViewer={onOpenViewer}
+              onToggleSelection={onToggleSelection}
+            />
+          );
+        })}
         {item.photos.length < 3 &&
           Array.from({ length: 3 - item.photos.length }).map((_, i) => (
             <View key={`spacer-${i}`} style={styles.gridCellContainer} />
@@ -1813,7 +2333,7 @@ const MemoizedGridRow = React.memo(
       if (prev.item.photos[i].photoIndex !== next.item.photos[i].photoIndex) return false;
     }
 
-    // Check if uploading, selection, or favorite state changed specifically for photos in THIS row
+    // Check if uploading, selection, favorite, or uploaded state changed specifically for photos in THIS row
     for (const { photo } of prev.item.photos) {
       const wasUploading = prev.uploadingPhotoIds.has(photo.id);
       const isUploading = next.uploadingPhotoIds.has(photo.id);
@@ -1826,6 +2346,10 @@ const MemoizedGridRow = React.memo(
       const wasFavorite = prev.favoritePhotoIds.has(photo.id);
       const isFavorite = next.favoritePhotoIds.has(photo.id);
       if (wasFavorite !== isFavorite) return false;
+
+      const wasUploaded = isPhotoInUploadedSet(photo, prev.uploadedPhotoIds);
+      const isUploaded = isPhotoInUploadedSet(photo, next.uploadedPhotoIds);
+      if (wasUploaded !== isUploaded) return false;
     }
 
     return true;
@@ -1837,15 +2361,17 @@ const MemoizedBatchHeader = React.memo(
     section,
     isDark,
     selectedPhotoIds,
+    uploadedPhotoIds,
     onToggleBatchSelection,
   }: {
     section: GalleryBatchSection;
     isDark: boolean;
     selectedPhotoIds: Set<string>;
+    uploadedPhotoIds: Set<string>;
     onToggleBatchSelection: (batch: RuntimeBatch) => void;
   }) => {
     const { title, batch } = section;
-    const selectablePhotos = batch.photos.filter(p => p.status !== 'uploaded');
+    const selectablePhotos = batch.photos.filter(p => !isPhotoInUploadedSet(p, uploadedPhotoIds));
     const isAllBatchSelected =
       selectablePhotos.length > 0 && selectablePhotos.every(p => selectedPhotoIds.has(p.id));
 
@@ -1923,12 +2449,13 @@ const MemoizedBatchHeader = React.memo(
 
     if (prev.section.batch.photos.length !== next.section.batch.photos.length) return false;
     for (let i = 0; i < prev.section.batch.photos.length; i++) {
-      if (
-        prev.selectedPhotoIds.has(prev.section.batch.photos[i].id) !==
-        next.selectedPhotoIds.has(next.section.batch.photos[i].id)
-      )
-        return false;
-      if (prev.section.batch.photos[i].status !== next.section.batch.photos[i].status) return false;
+      const photo = prev.section.batch.photos[i];
+      if (prev.selectedPhotoIds.has(photo.id) !== next.selectedPhotoIds.has(photo.id)) return false;
+      if (photo.status !== next.section.batch.photos[i].status) return false;
+
+      const wasUploaded = isPhotoInUploadedSet(photo, prev.uploadedPhotoIds);
+      const isUploaded = isPhotoInUploadedSet(photo, next.uploadedPhotoIds);
+      if (wasUploaded !== isUploaded) return false;
     }
 
     return true;
@@ -2908,5 +3435,103 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.jetbrainsMono.bold,
     fontSize: 11,
     fontWeight: '600',
+  },
+  // Camera Disconnection Prompt Banner
+  disconnectBannerWrapper: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  disconnectBannerFace: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  disconnectBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 10,
+  },
+  disconnectBannerIcon: {
+    flexShrink: 0,
+  },
+  disconnectBannerTextContainer: {
+    flex: 1,
+  },
+  disconnectBannerTitle: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  disconnectBannerBody: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  disconnectRetryButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  disconnectRetryText: {
+    color: '#FFFFFF',
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 12,
+  },
+  // Skipped Format Notice Banner
+  skippedBannerWrapper: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  skippedBannerFace: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  skippedBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 10,
+  },
+  skippedBannerIcon: {
+    flexShrink: 0,
+  },
+  skippedBannerTextContainer: {
+    flex: 1,
+  },
+  skippedBannerTitle: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  skippedBannerBody: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  skippedDismissButton: {
+    padding: 6,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
   },
 });

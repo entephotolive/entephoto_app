@@ -78,6 +78,7 @@ export interface FullScreenPhotoViewerProps {
   onToggleMark: (id: string) => void;
   onToggleFavorite: (id: string) => void;
   favoritePhotoIds: Set<string>;
+  uploadedPhotoIds?: Set<string>;
   onUploadPhoto: (photo: GalleryPhotoItem) => void;
   onDeletePhoto: (photo: GalleryPhotoItem) => void;
   isDark?: boolean;
@@ -94,6 +95,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   onToggleMark,
   onToggleFavorite,
   favoritePhotoIds,
+  uploadedPhotoIds,
   onUploadPhoto,
   onDeletePhoto,
 }) => {
@@ -388,7 +390,12 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
   const isSelected = currentPhoto.selected;
   const isFavorite = favoritePhotoIds.has(currentPhoto.id); // bulk-upload queue
-  const isUploaded = currentPhoto.status === 'uploaded';
+  const isUploaded =
+    currentPhoto.status === 'uploaded' ||
+    (uploadedPhotoIds
+      ? uploadedPhotoIds.has(currentPhoto.id) ||
+        Boolean(currentPhoto.filename && uploadedPhotoIds.has(currentPhoto.filename))
+      : false);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (

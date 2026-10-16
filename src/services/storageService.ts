@@ -146,4 +146,59 @@ export const storageService = {
       console.error('[storageService] Failed to save theme preference to SecureStore:', error);
     }
   },
+
+  async getUploadedPhotoKeys(eventId: string): Promise<string[]> {
+    if (!eventId) return [];
+    try {
+      const key = `entephoto_uploaded_photos_${eventId}`;
+      const data = await SecureStore.getItemAsync(key);
+      if (!data) return [];
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+        return parsed;
+      }
+      return [];
+    } catch (error) {
+      console.error(
+        '[storageService] Failed to get uploaded photo keys for event:',
+        eventId,
+        error,
+      );
+      return [];
+    }
+  },
+
+  async setUploadedPhotoKeys(eventId: string, keys: string[]): Promise<void> {
+    if (!eventId) return;
+    try {
+      const key = `entephoto_uploaded_photos_${eventId}`;
+      await SecureStore.setItemAsync(key, JSON.stringify(keys));
+    } catch (error) {
+      console.error(
+        '[storageService] Failed to save uploaded photo keys for event:',
+        eventId,
+        error,
+      );
+    }
+  },
+
+  async markPhotosUploaded(eventId: string, photoIdentifiers: string[]): Promise<void> {
+    if (!eventId || photoIdentifiers.length === 0) return;
+    try {
+      const existing = await this.getUploadedPhotoKeys(eventId);
+      const set = new Set(existing);
+      let changed = false;
+      for (const id of photoIdentifiers) {
+        if (!set.has(id)) {
+          set.add(id);
+          changed = true;
+        }
+      }
+      if (changed) {
+        await this.setUploadedPhotoKeys(eventId, Array.from(set));
+      }
+    } catch (error) {
+      console.error('[storageService] Failed to mark photos uploaded:', error);
+    }
+  },
 };
