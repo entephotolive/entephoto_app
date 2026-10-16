@@ -1,1 +1,0 @@
-./gradlew :app:assembleDebug./gradlew :app:assembleDebug
