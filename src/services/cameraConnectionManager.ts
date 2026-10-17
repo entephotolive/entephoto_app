@@ -20,9 +20,15 @@ export type GalleryCameraState =
   | 'disconnected'
   | 'permission_required';
 
+export type DiscoveryOutcome = 'idle' | 'searching' | 'found' | 'not_found';
+
+const DISCOVERY_TIMEOUT_MS = 10_000;
+let discoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
 interface CameraConnectionStore {
   state: GalleryCameraState;
   model: string | null;
+  discoveryOutcome: DiscoveryOutcome;
   listeners: Set<() => void>;
   initialized: boolean;
   subscriptions: { remove: () => void }[];
@@ -51,6 +57,7 @@ function normalizeState(state: ConnectionState): GalleryCameraState {
 const store: CameraConnectionStore = {
   state: 'disconnected',
   model: null,
+  discoveryOutcome: 'idle',
   listeners: new Set(),
   initialized: false,
   subscriptions: [],
@@ -64,6 +71,62 @@ function notifyListeners() {
       console.warn('[CameraConnectionManager] Error in listener:', e);
     }
   });
+}
+
+function setDiscoveryOutcome(outcome: DiscoveryOutcome) {
+  if (store.discoveryOutcome !== outcome) {
+    store.discoveryOutcome = outcome;
+    notifyListeners();
+  }
+}
+
+function clearDiscoveryTimer() {
+  if (discoveryTimer !== null) {
+    clearTimeout(discoveryTimer);
+    discoveryTimer = null;
+  }
+}
+
+function handleDiscoveryTimeout() {
+  discoveryTimer = null;
+
+  // Verify the camera is still genuinely in searching state
+  const currentNative = safeGetNativeState();
+  if (
+    store.state !== 'searching' ||
+    currentNative === 'connected' ||
+    currentNative === 'connecting' ||
+    currentNative === 'reconnecting' ||
+    currentNative === 'permission_required'
+  ) {
+    // Camera is connected, connecting, or permission is requested — do not interrupt
+    if (currentNative === 'connected' || store.state === 'connected') {
+      setDiscoveryOutcome('found');
+    }
+    return;
+  }
+
+  console.log(
+    '[CameraConnectionManager] 10s discovery timeout reached with no camera found. Stopping search.',
+  );
+  // Record not_found outcome separately from native connection state
+  setDiscoveryOutcome('not_found');
+
+  try {
+    nativeStopSearch();
+  } catch (e) {
+    console.warn('[CameraConnectionManager] stopSearch error on timeout:', e);
+  }
+
+  const postStop = safeGetNativeState();
+  updateState(postStop);
+}
+
+function startDiscoveryTimer() {
+  clearDiscoveryTimer();
+  discoveryTimer = setTimeout(() => {
+    handleDiscoveryTimeout();
+  }, DISCOVERY_TIMEOUT_MS);
 }
 
 function updateState(newState: GalleryCameraState, newModel?: string | null) {
@@ -99,6 +162,17 @@ function ensureInitialized() {
   const stateSub = addConnectionStateListener(event => {
     console.log('[CameraConnectionManager] Native state changed:', event.state);
     const normalized = normalizeState(event.state);
+    if (
+      normalized === 'connecting' ||
+      normalized === 'connected' ||
+      normalized === 'reconnecting' ||
+      normalized === 'permission_required'
+    ) {
+      clearDiscoveryTimer();
+      if (normalized === 'connected') {
+        setDiscoveryOutcome('found');
+      }
+    }
     updateState(normalized);
   });
   store.subscriptions.push(stateSub);
@@ -106,6 +180,8 @@ function ensureInitialized() {
   // Subscribe to device found
   const foundSub = addDeviceFoundListener(event => {
     console.log('[CameraConnectionManager] Device found:', event.deviceName);
+    clearDiscoveryTimer();
+    setDiscoveryOutcome('found');
     updateState('connected', event.deviceName);
   });
   store.subscriptions.push(foundSub);
@@ -114,6 +190,7 @@ function ensureInitialized() {
   const discSub = addDeviceDisconnectedListener(event => {
     console.log('[CameraConnectionManager] Device disconnected, reason:', event.reason);
     if (store.state === 'connected') {
+      setDiscoveryOutcome('idle');
       updateState('disconnected', null);
     }
   });
@@ -126,7 +203,19 @@ function ensureInitialized() {
       try {
         nativeReconcileState();
         const current = getConnectionState();
-        updateState(normalizeState(current));
+        const normalized = normalizeState(current);
+        if (
+          normalized === 'connecting' ||
+          normalized === 'connected' ||
+          normalized === 'reconnecting' ||
+          normalized === 'permission_required'
+        ) {
+          clearDiscoveryTimer();
+          if (normalized === 'connected') {
+            setDiscoveryOutcome('found');
+          }
+        }
+        updateState(normalized);
       } catch (err) {
         console.warn('[CameraConnectionManager] Reconcile error:', err);
       }
@@ -163,13 +252,20 @@ function getModelSnapshot(): string | null {
   return store.model;
 }
 
+function getDiscoveryOutcomeSnapshot(): DiscoveryOutcome {
+  ensureInitialized();
+  return store.discoveryOutcome;
+}
+
 // ── Stable Camera Actions ──────────────────────────────────────────────────
 
-function startSearch(): void {
+function startSearch(forceRestart: boolean = false): void {
   ensureInitialized();
   const currentNative = safeGetNativeState();
   if (currentNative === 'connected') {
     // Native RemoteShooting session is already alive — never clobber with 'searching'
+    clearDiscoveryTimer();
+    setDiscoveryOutcome('found');
     updateState('connected');
     return;
   }
@@ -179,16 +275,38 @@ function startSearch(): void {
     currentNative === 'permission_required'
   ) {
     // In-flight connection attempt or permission request — preserve native status
+    clearDiscoveryTimer();
     updateState(currentNative);
     return;
   }
 
-  // Camera is disconnected or idle — begin search
+  if (!forceRestart && store.state === 'searching' && discoveryTimer !== null) {
+    // A discovery attempt is already actively in progress with an active timer.
+    // Prevent overlapping timers or resets from repeated renders.
+    return;
+  }
+
+  // Camera is disconnected or idle — begin genuine new discovery attempt
+  clearDiscoveryTimer();
+  setDiscoveryOutcome('searching');
   updateState('searching');
+  startDiscoveryTimer();
+
   try {
     nativeStartSearch();
     const postSearch = safeGetNativeState();
     if (postSearch !== 'disconnected' && postSearch !== 'searching') {
+      if (
+        postSearch === 'connecting' ||
+        postSearch === 'connected' ||
+        postSearch === 'reconnecting' ||
+        postSearch === 'permission_required'
+      ) {
+        clearDiscoveryTimer();
+        if (postSearch === 'connected') {
+          setDiscoveryOutcome('found');
+        }
+      }
       updateState(postSearch);
     }
   } catch (e) {
@@ -198,6 +316,10 @@ function startSearch(): void {
 
 function stopSearch(): void {
   ensureInitialized();
+  clearDiscoveryTimer();
+  if (store.discoveryOutcome === 'searching') {
+    setDiscoveryOutcome('idle');
+  }
   try {
     nativeStopSearch();
     const current = safeGetNativeState();
@@ -209,6 +331,8 @@ function stopSearch(): void {
 
 function disconnectCamera(): void {
   ensureInitialized();
+  clearDiscoveryTimer();
+  setDiscoveryOutcome('idle');
   try {
     updateState('disconnected', null);
     nativeDisconnect();
@@ -222,6 +346,17 @@ function reconcile(): void {
   try {
     nativeReconcileState();
     const current = safeGetNativeState();
+    if (
+      current === 'connecting' ||
+      current === 'connected' ||
+      current === 'reconnecting' ||
+      current === 'permission_required'
+    ) {
+      clearDiscoveryTimer();
+      if (current === 'connected') {
+        setDiscoveryOutcome('found');
+      }
+    }
     updateState(current);
   } catch (e) {
     console.warn('[CameraConnectionManager] reconcile error:', e);
@@ -235,10 +370,13 @@ function reconcile(): void {
 export function useCameraConnection() {
   const connectionState = useSyncExternalStore(subscribeToStore, getStateSnapshot);
   const cameraModel = useSyncExternalStore(subscribeToStore, getModelSnapshot);
+  const discoveryOutcome = useSyncExternalStore(subscribeToStore, getDiscoveryOutcomeSnapshot);
 
   return {
     connectionState,
     cameraModel,
+    discoveryOutcome,
+    isNotFound: discoveryOutcome === 'not_found',
     isConnected: connectionState === 'connected',
     isReconnecting: connectionState === 'reconnecting',
     isSearching: connectionState === 'searching',
@@ -258,6 +396,10 @@ export const cameraConnectionManager = {
     return store.state;
   },
   getModel: (): string | null => store.model,
+  getDiscoveryOutcome: (): DiscoveryOutcome => {
+    ensureInitialized();
+    return store.discoveryOutcome;
+  },
   startSearch,
   stopSearch,
   disconnect: disconnectCamera,

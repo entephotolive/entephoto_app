@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useSafeAreaInsets, SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -22,9 +22,6 @@ import {
   Plus,
   Calendar,
   Image as ImageIcon,
-  Check,
-  ChevronRight,
-  ArrowRight,
   Smartphone,
   Inbox,
   Mail,
@@ -271,34 +268,48 @@ export const SelectEventScreen: React.FC = () => {
     return result;
   }, [events, searchQuery, appliedCategories, appliedStatus, appliedSort]);
 
-  // Find selected event and check if mobile access is allowed
+  // Find selected event (used by mobile upload restriction explanation modal)
   const selectedEvent = useMemo(() => {
     if (!selectedEventId) return null;
     return events.find(e => e._id.$oid === selectedEventId) ?? null;
   }, [events, selectedEventId]);
 
-  const isMobileAllowed = Boolean(selectedEvent && selectedEvent.mobile === true);
-  const isContinueDisabled = !selectedEvent || !isMobileAllowed;
+  // Guard against accidental double navigation while transition is underway
+  const isNavigatingRef = useRef(false);
 
-  const handleSelectEvent = useCallback((eventId: string) => {
-    setSelectedEventId(prev => (prev === eventId ? null : eventId));
-  }, []);
-
-  const handleContinue = useCallback(() => {
-    if (!selectedEvent) return;
-    if (!selectedEvent.mobile) {
-      setIsMobileWarningModalVisible(true);
-      return;
-    }
-    console.log('[SelectEventScreen] Continuing with Event:', selectedEvent.title);
-    navigation.navigate('CameraConnect', {
-      eventId: selectedEvent._id.$oid,
-      eventTitle: selectedEvent.title,
-      eventDate: selectedEvent.date.$date,
-      eventCategory: selectedEvent.category,
-      coverImage: selectedEvent.coverImage,
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      isNavigatingRef.current = false;
     });
-  }, [selectedEvent, navigation]);
+    return unsubscribe;
+  }, [navigation]);
+
+  const handleCardPress = useCallback(
+    (event: EventModel) => {
+      if (isNavigatingRef.current) return;
+
+      if (!event.mobile) {
+        setSelectedEventId(event._id.$oid);
+        setIsMobileWarningModalVisible(true);
+        return;
+      }
+
+      isNavigatingRef.current = true;
+      console.log('[SelectEventScreen] Opening Event:', event.title);
+      navigation.navigate('CameraConnect', {
+        eventId: event._id.$oid,
+        eventTitle: event.title,
+        eventDate: event.date.$date,
+        eventCategory: event.category,
+        coverImage: event.coverImage,
+      });
+
+      setTimeout(() => {
+        isNavigatingRef.current = false;
+      }, 1500);
+    },
+    [navigation],
+  );
 
   const handleSignOut = useCallback(() => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -343,7 +354,6 @@ export const SelectEventScreen: React.FC = () => {
 
   const renderEventCard = useCallback(
     ({ item }: { item: EventModel }) => {
-      const isSelected = selectedEventId === item._id.$oid;
       const category = getCategoryFromTitle(item.title, item.category);
       const subtitle = getSubtitleFromTitle(item.title, item.category);
       const formattedDate = formatEventDate(item.date.$date);
@@ -356,39 +366,34 @@ export const SelectEventScreen: React.FC = () => {
 
       return (
         <Pressable
-          onPress={() => handleSelectEvent(item._id.$oid)}
+          onPress={() => handleCardPress(item)}
           style={({ pressed }) => [
-            styles.cardWrapper,
+            styles.cardPressable,
             {
-              backgroundColor: isSelected
-                ? isDark
-                  ? 'rgba(255, 107, 74, 0.16)'
-                  : '#FFF1ED'
-                : isDark
-                  ? '#1A1A1E'
-                  : 'rgba(255, 253, 251, 0.85)',
-              borderColor: isSelected ? '#FF7D5C' : isDark ? '#2E2E36' : 'rgba(220, 214, 206, 0.7)',
-              borderWidth: isSelected ? 2 : 1,
-              shadowColor: isSelected ? '#FF6B4A' : '#161616',
-              shadowOpacity: isSelected ? 0.14 : 0.04,
-              shadowRadius: isSelected ? 14 : 6,
-              elevation: isSelected ? 3 : 1,
               transform: [{ scale: pressed ? 0.985 : 1 }],
+              opacity: pressed ? 0.92 : 1,
             },
           ]}
-          accessibilityRole="checkbox"
-          accessibilityState={{ checked: isSelected }}
-          accessibilityLabel={`${item.title}, ${subtitle}, ${formattedDate}, ${item.photoCount} photos. ${isSelected ? 'Selected' : 'Not selected'}`}
-          accessibilityHint="Double tap to select this event"
+          accessibilityRole="button"
+          accessibilityLabel={`${item.title}, ${subtitle}, ${formattedDate}, ${item.photoCount} photos`}
+          accessibilityHint="Tap to open this event"
         >
           {/*
-           * cardRow: an inner plain-object-style View that owns ALL flex row geometry.
-           * Pressable's function-style prop creates a new array every render; on Android
-           * (RN 0.86 + Hermes) this can silently drop flexDirection from the merged base
-           * stylesheet. A dedicated child View with a static style is immune to this.
+           * Dedicated cardBox View: Owns the card's surface background, delicate border,
+           * border-radius, elevation shadow, and padding. Using a dedicated View inside Pressable
+           * guarantees Android/Hermes renders the unified rounded rectangle reliably without
+           * dropping layout or background properties across renders.
            */}
-          <View style={styles.cardRow}>
-            {/* Thumbnail — outer container (no overflow) + inner clip (overflow:hidden) */}
+          <View
+            style={[
+              styles.cardBox,
+              {
+                backgroundColor: isDark ? '#1E1E24' : '#F2ECE2',
+                borderColor: isDark ? '#2E2E36' : '#DDD3C3',
+              },
+            ]}
+          >
+            {/* Thumbnail — outer container + inner clip with rounded corners */}
             <View style={styles.thumbnailContainer}>
               <View style={styles.thumbnailClip}>
                 {imageSource ? (
@@ -402,29 +407,32 @@ export const SelectEventScreen: React.FC = () => {
                   <View
                     style={[
                       styles.thumbnailPlaceholder,
-                      { backgroundColor: isDark ? '#2A2A32' : '#E8E2D8' },
+                      { backgroundColor: isDark ? '#2A2A32' : '#ECE5DB' },
                     ]}
                   >
                     <ImageIcon size={26} color={isDark ? '#5C5C6A' : '#A89E92'} strokeWidth={1.5} />
                   </View>
                 )}
 
-                {/* Category Tag pill on bottom-left — absolute relative to thumbnailClip */}
-                <View style={styles.categoryPill}>
-                  <Text style={styles.categoryPillText}>{category}</Text>
-                </View>
+                {/* Category Tag pill on bottom-left of placeholder */}
+                {!imageSource && (
+                  <View style={styles.categoryPill}>
+                    <Text style={styles.categoryPillText}>{category}</Text>
+                  </View>
+                )}
               </View>
             </View>
 
-            {/* Event Details (Strictly Height-Aligned 82px) */}
+            {/* Event Details — vertically centered beside thumbnail */}
             <View style={styles.eventInfo}>
-              <View>
+              <View style={styles.titleBlock}>
                 <Text
                   style={[
                     styles.eventTitle,
                     { color: isDark ? COLORS.textHighContrast : '#161616' },
                   ]}
                   numberOfLines={1}
+                  ellipsizeMode="tail"
                 >
                   {item.title}
                 </Text>
@@ -432,12 +440,13 @@ export const SelectEventScreen: React.FC = () => {
                 <Text
                   style={[styles.eventSubtitle, { color: isDark ? COLORS.textMuted : '#7A7571' }]}
                   numberOfLines={1}
+                  ellipsizeMode="tail"
                 >
                   {subtitle}
                 </Text>
               </View>
 
-              {/* Metadata Rows (Pinned to bottom) */}
+              {/* Metadata Rows */}
               <View style={styles.metaContainer}>
                 {/* Date Row */}
                 <View style={styles.metaItem}>
@@ -462,8 +471,8 @@ export const SelectEventScreen: React.FC = () => {
                 {/* Mobile indicator if enabled / disabled */}
                 {item.mobile ? (
                   <View style={styles.metaItem} accessibilityLabel="Mobile upload enabled">
-                    <Smartphone size={11} color="#45DFA4" strokeWidth={2.2} />
-                    <Text style={[styles.metaText, { color: '#45DFA4', fontWeight: '700' }]}>
+                    <Smartphone size={11} color="#22C55E" strokeWidth={2.2} />
+                    <Text style={[styles.metaText, { color: '#22C55E', fontWeight: '700' }]}>
                       Mobile
                     </Text>
                   </View>
@@ -481,36 +490,11 @@ export const SelectEventScreen: React.FC = () => {
                 )}
               </View>
             </View>
-
-            {/* Right Action Column (Strictly Height-Aligned 82px) */}
-            <View style={styles.rightActionCol}>
-              {/* Top Circle Badge (Tick / Chevron) */}
-              {isSelected ? (
-                <View
-                  style={[styles.checkCircle, { backgroundColor: isDark ? '#FF6B4A' : '#161616' }]}
-                >
-                  <Check size={14} color="#FFFFFF" strokeWidth={3} />
-                </View>
-              ) : (
-                <View
-                  style={[
-                    styles.chevronCircle,
-                    { backgroundColor: isDark ? '#26262E' : 'rgba(239, 233, 223, 0.8)' },
-                  ]}
-                >
-                  <ChevronRight
-                    size={14}
-                    color={isDark ? COLORS.textHighContrast : '#161616'}
-                    strokeWidth={2.4}
-                  />
-                </View>
-              )}
-            </View>
           </View>
         </Pressable>
       );
     },
-    [selectedEventId, isDark, handleSelectEvent],
+    [isDark, handleCardPress],
   );
 
   return (
@@ -567,7 +551,7 @@ export const SelectEventScreen: React.FC = () => {
           <View style={styles.heroSection}>
             <View style={styles.heroTextCol}>
               <Text style={[styles.heroHeadline, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                Select{'\n'}your event
+                Select{'\n'}your{'\n'}event
                 <Text style={{ color: '#FF6B4A' }}>.</Text>
               </Text>
               <Text style={[styles.heroSubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
@@ -756,7 +740,10 @@ export const SelectEventScreen: React.FC = () => {
             data={filteredEvents}
             keyExtractor={item => item._id.$oid || item.id}
             renderItem={renderEventCard}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: Math.max(insets.bottom + 16, 24) },
+            ]}
             showsVerticalScrollIndicator={false}
             refreshing={isRefetching}
             onRefresh={refetchEvents}
@@ -960,100 +947,6 @@ export const SelectEventScreen: React.FC = () => {
           </View>
         </Animated.View>
       </Modal>
-
-      {/* ── STICKY FOOTER BAR ── */}
-      <View
-        style={[
-          styles.footerContainer,
-          {
-            backgroundColor: isDark ? '#131315' : '#FAF7F2',
-            // Respect home-indicator safe area on iPhone; add minimum padding on Android
-            paddingBottom: Math.max(insets.bottom, 16),
-          },
-        ]}
-      >
-        {/* Warning Banner when selected event does not have mobile enabled — tap to view details modal */}
-        {selectedEvent && !isMobileAllowed && (
-          <TouchableOpacity
-            activeOpacity={0.8}
-            onPress={() => setIsMobileWarningModalVisible(true)}
-            style={[
-              styles.warningBanner,
-              {
-                backgroundColor: isDark ? 'rgba(239, 68, 68, 0.14)' : '#FEF2F2',
-                borderColor: isDark ? 'rgba(239, 68, 68, 0.3)' : '#FCA5A5',
-              },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="You cannot use mobile for this event. Tap for details"
-            accessibilityHint="Opens details explaining why mobile upload is unavailable for this event"
-          >
-            <AlertCircle
-              size={16}
-              color={isDark ? '#F87171' : '#DC2626'}
-              strokeWidth={2.2}
-              style={{ marginRight: 8, flexShrink: 0 }}
-            />
-            <Text
-              style={[styles.warningBannerText, { color: isDark ? '#FCA5A5' : '#B91C1C' }]}
-              numberOfLines={1}
-            >
-              You cannot use mobile for this event
-            </Text>
-            <View
-              style={[
-                styles.warningInfoBadge,
-                { backgroundColor: isDark ? 'rgba(239, 68, 68, 0.22)' : '#FEE2E2' },
-              ]}
-            >
-              <Text
-                style={[styles.warningInfoBadgeText, { color: isDark ? '#FCA5A5' : '#DC2626' }]}
-              >
-                Why?
-              </Text>
-              <ChevronRight size={12} color={isDark ? '#FCA5A5' : '#DC2626'} strokeWidth={2.4} />
-            </View>
-          </TouchableOpacity>
-        )}
-
-        <Pressable
-          onPress={handleContinue}
-          disabled={isContinueDisabled}
-          accessibilityRole="button"
-          accessibilityState={{ disabled: isContinueDisabled }}
-          accessibilityLabel="Continue"
-          style={({ pressed }) => [
-            styles.continueButtonWrapper,
-            {
-              opacity: isContinueDisabled ? 0.45 : 1,
-              transform: [{ translateY: pressed && !isContinueDisabled ? 2 : 0 }],
-            },
-          ]}
-        >
-          {({ pressed }) => (
-            <View style={styles.buttonShadowContainer}>
-              {/* Tactile Coral Shadow Underneath */}
-              <View
-                style={[
-                  styles.tactileShadowLayer,
-                  {
-                    top: pressed && !isContinueDisabled ? 2 : 6,
-                    left: 0,
-                    right: 0,
-                    bottom: pressed && !isContinueDisabled ? -2 : -6,
-                  },
-                ]}
-              />
-
-              {/* Main Button Face */}
-              <View style={styles.continueButtonFace}>
-                <Text style={styles.continueButtonText}>Continue</Text>
-                <ArrowRight size={20} color="#FFFFFF" strokeWidth={2.3} style={{ marginLeft: 4 }} />
-              </View>
-            </View>
-          )}
-        </Pressable>
-      </View>
 
       {/* ── INTERACTIVE PROFILE BOTTOM SHEET / MODAL ── */}
       <Modal
@@ -1504,41 +1397,38 @@ const styles = StyleSheet.create({
   // FlatList & Cards
   listContent: {
     paddingHorizontal: 24,
-    paddingBottom: 110, // Clears sticky footer
+    paddingBottom: 24,
     gap: 12,
   },
-  cardWrapper: {
-    // cardWrapper owns ONLY visual decoration (bg, border, shadow, radius, padding).
-    // Flex geometry (flexDirection:row) lives in cardRow below — immune to Pressable
-    // function-style-prop's style merging quirk on Android RN 0.86 + Hermes.
-    padding: 12,
-    borderRadius: 16,
-    shadowOffset: { width: 0, height: 4 },
+  cardPressable: {
     width: '100%',
-  },
-  // Inner view that owns ALL flex row geometry. Static plain-object style — never
-  // a function, never a dynamic array — so Yoga on Android always resolves it correctly.
-  cardRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     alignSelf: 'stretch',
   },
-  // Outer shell: NO overflow:hidden here. overflow:hidden on a flex child forces Yoga
-  // (Android) to treat it as an isolated stacking context, which collapses its
-  // contribution to the parent row and causes the vertical-stack bug.
+  cardBox: {
+    width: '100%',
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 18,
+    borderWidth: 1.2,
+    shadowColor: '#2D2218',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
   thumbnailContainer: {
-    width: 100,
-    height: 82,
+    width: 88,
+    height: 88,
     flexShrink: 0,
     backgroundColor: '#E5E5E5',
-    borderRadius: 12,
+    borderRadius: 14,
   },
-  // Inner clip: carries overflow:hidden and the border-radius clip so the image
-  // and category pill are still visually rounded, without affecting flex sizing.
   thumbnailClip: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: 14,
     overflow: 'hidden',
   },
   thumbnailImage: {
@@ -1553,29 +1443,31 @@ const styles = StyleSheet.create({
   },
   categoryPill: {
     position: 'absolute',
-    bottom: 4,
-    left: 4,
-    backgroundColor: 'rgba(0, 0, 0, 0.80)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    bottom: 5,
+    left: 5,
+    backgroundColor: '#1E1E1E',
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
     borderRadius: 4,
   },
   categoryPillText: {
     color: '#FFFFFF',
-    fontSize: 8.5,
+    fontSize: 9,
     fontWeight: '800',
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
     textTransform: 'uppercase',
   },
 
-  // Event Info (strictly 82px height matching thumbnail)
+  // Event Info (matching 88px thumbnail height, vertically centered)
   eventInfo: {
     flex: 1,
-    height: 82,
-    marginLeft: 12,
-    marginRight: 8,
-    justifyContent: 'space-between',
+    height: 88,
+    marginLeft: 14,
+    justifyContent: 'center',
     minWidth: 0,
+  },
+  titleBlock: {
+    marginBottom: 5,
   },
   eventTitle: {
     fontFamily: FONTS.syne.bold,
@@ -1590,50 +1482,17 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   metaContainer: {
-    gap: 2,
+    gap: 2.5,
   },
   metaItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 6,
   },
   metaText: {
-    fontSize: 11,
+    fontSize: 11.5,
     fontFamily: FONTS.plusJakartaSans.medium,
-    lineHeight: 14,
-  },
-
-  // Right Actions (strictly 82px height matching thumbnail)
-  rightActionCol: {
-    height: 82,
-    width: 32,
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingLeft: 4,
-  },
-  // elevation removed: on Android, elevation creates a separate compositing layer;
-  // when the surrounding layout collapses (due to the overflow:hidden bug above) the
-  // layer is sized against wrong parent dimensions, making borderRadius look like a
-  // huge circle. The card's own elevation already provides the visual depth.
-  checkCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chevronCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  moreOptionsBtn: {
-    width: 28,
-    height: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
+    lineHeight: 15,
   },
 
   // Empty & Loading
@@ -1677,75 +1536,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: FONTS.plusJakartaSans.bold,
   },
-
-  // Sticky Footer — paddingBottom is set dynamically via insets in JSX
-  footerContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    paddingHorizontal: 24,
-    paddingTop: 8,
-    zIndex: 100,
-  },
-  warningBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-    borderWidth: 1,
-    marginBottom: 10,
-  },
-  warningBannerText: {
-    fontSize: 13,
-    fontFamily: FONTS.plusJakartaSans.semiBold,
-    fontWeight: '600',
-    flex: 1,
-  },
-  warningInfoBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    marginLeft: 6,
-  },
-  warningInfoBadgeText: {
-    fontSize: 11,
-    fontFamily: FONTS.plusJakartaSans.bold,
-    fontWeight: '700',
-  },
-  continueButtonWrapper: {
-    width: '100%',
-  },
-  buttonShadowContainer: {
-    position: 'relative',
-    width: '100%',
-  },
-  tactileShadowLayer: {
-    position: 'absolute',
-    backgroundColor: '#FF6F4E', // button-3d-coral #FF6F4E
-    borderRadius: 28,
-    zIndex: 0,
-  },
-  continueButtonFace: {
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#181818',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1,
-  },
-  continueButtonText: {
-    color: '#FFFFFF',
-    fontFamily: FONTS.plusJakartaSans.bold,
-    fontSize: 16,
-    letterSpacing: 0.3,
-  },
-  // Removed manual home bar — safe area insets handle this now
 
   // Profile Modal / Bottom Sheet
   modalBackdrop: {

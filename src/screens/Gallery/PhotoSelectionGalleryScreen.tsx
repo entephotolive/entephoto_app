@@ -10,6 +10,7 @@ import {
   Platform,
   ActivityIndicator,
   Animated,
+  Easing,
   Image,
   useWindowDimensions,
 } from 'react-native';
@@ -56,7 +57,11 @@ import {
   buildPhotoBatchesSync,
   buildGallerySections,
 } from '@/services/photoBatchingService';
-import { useCameraConnection, GalleryCameraState } from '@/services/cameraConnectionManager';
+import {
+  useCameraConnection,
+  GalleryCameraState,
+  DiscoveryOutcome,
+} from '@/services/cameraConnectionManager';
 import { addPhotoSkippedListener } from 'entephoto-camera';
 
 function isPhotoInUploadedSet(
@@ -70,8 +75,42 @@ function isPhotoInUploadedSet(
   );
 }
 
-function getCameraStatusStyle(state: GalleryCameraState, isDark: boolean) {
-  switch (state) {
+export type DisplayedCameraStatus =
+  | 'connected'
+  | 'connecting'
+  | 'reconnecting'
+  | 'searching'
+  | 'permission_required'
+  | 'camera_not_found'
+  | 'not_connected';
+
+function getDisplayedCameraStatus(
+  connectionState: GalleryCameraState,
+  discoveryOutcome: DiscoveryOutcome,
+  isNotFound: boolean,
+): DisplayedCameraStatus {
+  switch (connectionState) {
+    case 'connected':
+      return 'connected';
+    case 'connecting':
+      return 'connecting';
+    case 'reconnecting':
+      return 'reconnecting';
+    case 'permission_required':
+      return 'permission_required';
+    case 'searching':
+      return 'searching';
+    case 'disconnected':
+    default:
+      if (isNotFound || discoveryOutcome === 'not_found') {
+        return 'camera_not_found';
+      }
+      return 'not_connected';
+  }
+}
+
+function getCameraStatusStyle(status: DisplayedCameraStatus, isDark: boolean) {
+  switch (status) {
     case 'connected':
       return {
         backgroundColor: isDark ? 'rgba(16, 185, 129, 0.2)' : '#D2F4E2',
@@ -93,7 +132,8 @@ function getCameraStatusStyle(state: GalleryCameraState, isDark: boolean) {
         backgroundColor: isDark ? 'rgba(245, 158, 11, 0.2)' : '#FEF3C7',
         borderColor: isDark ? '#FBBF24' : '#F59E0B',
       };
-    case 'disconnected':
+    case 'camera_not_found':
+    case 'not_connected':
     default:
       return {
         backgroundColor: isDark ? 'rgba(239, 68, 68, 0.18)' : '#FEE2E2',
@@ -102,8 +142,8 @@ function getCameraStatusStyle(state: GalleryCameraState, isDark: boolean) {
   }
 }
 
-function getCameraStatusTextColor(state: GalleryCameraState, isDark: boolean) {
-  switch (state) {
+function getCameraStatusTextColor(status: DisplayedCameraStatus, isDark: boolean) {
+  switch (status) {
     case 'connected':
       return isDark ? '#6EE7B7' : '#065F46';
     case 'reconnecting':
@@ -112,41 +152,44 @@ function getCameraStatusTextColor(state: GalleryCameraState, isDark: boolean) {
     case 'searching':
     case 'connecting':
       return isDark ? '#BAE6FD' : '#0369A1';
-    case 'disconnected':
+    case 'camera_not_found':
+    case 'not_connected':
     default:
       return isDark ? '#FCA5A5' : '#991B1B';
   }
 }
 
-function getCameraStatusLabel(state: GalleryCameraState) {
-  switch (state) {
+function getCameraStatusLabel(status: DisplayedCameraStatus): string {
+  switch (status) {
     case 'connected':
       return 'Connected';
     case 'reconnecting':
       return 'Reconnecting…';
     case 'searching':
-      return 'Searching';
+      return 'Searching…';
     case 'connecting':
-      return 'Connecting';
+      return 'Connecting…';
     case 'permission_required':
       return 'Permission Required';
-    case 'disconnected':
+    case 'camera_not_found':
+      return 'Camera not found';
+    case 'not_connected':
     default:
-      return 'Disconnected';
+      return 'Not connected';
   }
 }
 
-function renderCameraStatusIndicator(state: GalleryCameraState) {
-  if (state === 'searching' || state === 'connecting') {
+function renderCameraStatusIndicator(status: DisplayedCameraStatus) {
+  if (status === 'searching' || status === 'connecting') {
     return <ActivityIndicator size={9} color="#0284C7" style={{ marginRight: 6 }} />;
   }
-  if (state === 'reconnecting') {
+  if (status === 'reconnecting') {
     return <ActivityIndicator size={9} color="#F59E0B" style={{ marginRight: 6 }} />;
   }
   let dotColor = '#EF4444';
-  if (state === 'connected') {
+  if (status === 'connected') {
     dotColor = '#10B981';
-  } else if (state === 'permission_required') {
+  } else if (status === 'permission_required') {
     dotColor = '#F59E0B';
   }
 
@@ -234,6 +277,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const {
     connectionState: cameraConnectionState,
     cameraModel,
+    discoveryOutcome,
+    isNotFound,
     startSearch: startCameraSearch,
     reconcile: reconcileCameraState,
   } = useCameraConnection();
@@ -242,6 +287,32 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   useEffect(() => {
     startCameraSearch();
   }, [startCameraSearch]);
+
+  const displayedCameraStatus = useMemo(
+    () => getDisplayedCameraStatus(cameraConnectionState, discoveryOutcome, isNotFound),
+    [cameraConnectionState, discoveryOutcome, isNotFound],
+  );
+
+  const canReconnect =
+    displayedCameraStatus === 'camera_not_found' || displayedCameraStatus === 'not_connected';
+
+  const handleReconnectPress = useCallback(() => {
+    console.log('[Gallery] Reconnect button pressed — starting fresh camera discovery');
+    startCameraSearch();
+  }, [startCameraSearch]);
+
+  // Smooth header title collapse when camera is not found to prevent layout overflow
+  const isTitleHidden = displayedCameraStatus === 'camera_not_found';
+  const [titleVisibilityAnim] = useState(() => new Animated.Value(isTitleHidden ? 0 : 1));
+
+  useEffect(() => {
+    Animated.timing(titleVisibilityAnim, {
+      toValue: isTitleHidden ? 0 : 1,
+      duration: 250,
+      easing: Easing.bezier(0.25, 0.1, 0.25, 1),
+      useNativeDriver: false,
+    }).start();
+  }, [isTitleHidden, titleVisibilityAnim]);
 
   // Track if a camera connection has ever been established in this session.
   // This prevents showing the disconnect warning during normal initial discovery.
@@ -1463,15 +1534,44 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             <ArrowLeft size={20} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={2.4} />
           </TouchableOpacity>
 
-          {/* Event Title Block */}
-          <View style={styles.headerTitleBlock}>
+          {/* Animated Event Title Block */}
+          <Animated.View
+            style={[
+              styles.headerTitleBlock,
+              {
+                opacity: titleVisibilityAnim.interpolate({
+                  inputRange: [0, 0.35, 1],
+                  outputRange: [0, 0, 1],
+                }),
+                maxWidth: titleVisibilityAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, 360],
+                }),
+                marginHorizontal: titleVisibilityAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, 14],
+                }),
+                transform: [
+                  {
+                    translateX: titleVisibilityAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [-8, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+            pointerEvents={isTitleHidden ? 'none' : 'auto'}
+            aria-hidden={isTitleHidden}
+          >
             <Text
               style={[styles.eventTitleText, { color: isDark ? '#F4F4F5' : '#161616' }]}
-              numberOfLines={2}
+              numberOfLines={1}
+              ellipsizeMode="tail"
             >
               {eventTitle}
             </Text>
-          </View>
+          </Animated.View>
 
           {/* Right Header Actions: Camera Status Badge & More Menu */}
           <View style={styles.headerRightActions}>
@@ -1482,21 +1582,52 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               style={[
                 styles.connectedStatusPill,
-                getCameraStatusStyle(cameraConnectionState, isDark),
+                getCameraStatusStyle(displayedCameraStatus, isDark),
               ]}
               accessibilityRole="button"
-              accessibilityLabel={`Camera status: ${getCameraStatusLabel(cameraConnectionState)}`}
+              accessibilityLabel={`Camera status: ${getCameraStatusLabel(displayedCameraStatus)}`}
             >
-              {renderCameraStatusIndicator(cameraConnectionState)}
+              {renderCameraStatusIndicator(displayedCameraStatus)}
               <Text
                 style={[
                   styles.connectedPillLabel,
-                  { color: getCameraStatusTextColor(cameraConnectionState, isDark) },
+                  { color: getCameraStatusTextColor(displayedCameraStatus, isDark) },
                 ]}
               >
-                {getCameraStatusLabel(cameraConnectionState)}
+                {getCameraStatusLabel(displayedCameraStatus)}
               </Text>
             </TouchableOpacity>
+
+            {/* Reconnect button: visible when Camera not found or Not connected */}
+            {canReconnect && (
+              <TouchableOpacity
+                activeOpacity={0.75}
+                onPress={handleReconnectPress}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={[
+                  styles.reconnectButton,
+                  {
+                    backgroundColor: isDark ? 'rgba(255, 107, 74, 0.16)' : '#FCEEE8',
+                    borderColor: isDark ? 'rgba(255, 107, 74, 0.35)' : '#F6C5B8',
+                  },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Reconnect camera"
+                accessibilityHint="Starts a fresh 10-second camera discovery attempt"
+              >
+                <RefreshCw
+                  size={11}
+                  color={isDark ? '#FF8A65' : '#161616'}
+                  strokeWidth={2.4}
+                  style={styles.reconnectButtonIcon}
+                />
+                <Text
+                  style={[styles.reconnectButtonText, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                >
+                  Reconnect
+                </Text>
+              </TouchableOpacity>
+            )}
 
             {/* More Options Button */}
             <TouchableOpacity
@@ -1539,28 +1670,30 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                   style={({ pressed }) => [
                     styles.filterChipWrapper,
                     {
-                      transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
+                      transform: [{ translateY: pressed ? 1.5 : 0 }],
                     },
                   ]}
                   accessibilityRole="tab"
                   accessibilityState={{ selected: isSelected }}
                 >
-                  {/* Shadow Underlay for Unselected Filter Chips */}
-                  {!isSelected && <View style={styles.chipShadowUnderlay} />}
-
                   <View
                     style={[
                       styles.filterChipFace,
                       isSelected
                         ? [
                             styles.filterChipSelectedFace,
-                            { backgroundColor: '#161616', borderColor: '#161616' },
+                            {
+                              backgroundColor: isDark ? '#2A2A30' : '#222226',
+                              borderColor: isDark ? '#3F3F46' : '#161616',
+                              borderBottomColor: isDark ? '#09090B' : '#000000',
+                            },
                           ]
                         : [
                             styles.filterChipDefaultFace,
                             {
                               backgroundColor: isDark ? '#1A1A1E' : '#FAF7F2',
-                              borderColor: isDark ? '#2E2E36' : '#161616',
+                              borderColor: isDark ? '#3F3F46' : '#161616',
+                              borderBottomColor: isDark ? '#161618' : '#161616',
                             },
                           ],
                     ]}
@@ -2490,8 +2623,8 @@ const styles = StyleSheet.create({
   },
   headerTitleBlock: {
     flex: 1,
-    marginHorizontal: 14,
     justifyContent: 'center',
+    overflow: 'hidden',
   },
   eventTitleText: {
     fontFamily: FONTS.syne.bold,
@@ -2509,6 +2642,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flexShrink: 0,
   },
   connectedStatusPill: {
     flexDirection: 'row',
@@ -2531,6 +2665,23 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#161616',
   },
+  reconnectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1.2,
+  },
+  reconnectButtonIcon: {
+    marginRight: 4,
+  },
+  reconnectButtonText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 11.5,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+  },
   moreOptionsButton: {
     width: 38,
     height: 38,
@@ -2542,46 +2693,28 @@ const styles = StyleSheet.create({
 
   // ── 2. Filter Row Styles ──
   filterRowContainer: {
-    paddingBottom: 12,
+    paddingBottom: 6,
   },
   filterScrollContent: {
     paddingHorizontal: 16,
+    paddingTop: 3,
+    paddingBottom: 8,
     gap: 10,
   },
   filterChipWrapper: {
     position: 'relative',
   },
-  chipShadowUnderlay: {
-    position: 'absolute',
-    top: 2,
-    left: 2,
-    right: -2,
-    bottom: -2,
-    borderRadius: 24,
-    backgroundColor: '#161616',
-  },
   filterChipFace: {
+    height: 40,
     paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 24,
-    borderWidth: 2,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderBottomWidth: 3.5,
     alignItems: 'center',
     justifyContent: 'center',
   },
   filterChipDefaultFace: {},
-  filterChipSelectedFace: {
-    ...Platform.select({
-      ios: {
-        shadowColor: '#161616',
-        shadowOffset: { width: 2, height: 2 },
-        shadowOpacity: 0.9,
-        shadowRadius: 0,
-      },
-      android: {
-        elevation: 3,
-      },
-    }),
-  },
+  filterChipSelectedFace: {},
   filterChipText: {
     fontFamily: FONTS.syne.bold,
     fontSize: 13,

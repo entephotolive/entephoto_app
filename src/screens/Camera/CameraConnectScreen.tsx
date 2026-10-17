@@ -24,6 +24,8 @@ import {
   Usb,
   Camera,
   Terminal,
+  Image as ImageIcon,
+  ChevronRight,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -102,6 +104,23 @@ export const CameraConnectScreen: React.FC = () => {
   const handleSelectWifi = useCallback(() => {
     setIsWifiUnavailableModalVisible(true);
   }, []);
+
+  const handleGoToGallery = useCallback(() => {
+    navigation.navigate('PhotoSelectionGallery', {
+      eventId: route.params?.eventId,
+      eventTitle,
+      eventDate: route.params?.eventDate,
+      eventCategory: route.params?.eventCategory,
+      coverImage,
+    });
+  }, [
+    navigation,
+    route.params?.eventId,
+    route.params?.eventDate,
+    route.params?.eventCategory,
+    eventTitle,
+    coverImage,
+  ]);
 
   // ── Native camera event listeners (registered once on mount) ────────────
   useEffect(() => {
@@ -329,6 +348,37 @@ export const CameraConnectScreen: React.FC = () => {
 
           {/* ── 3. CAMERA HERO 3D CARD ── */}
           <View style={styles.cameraHeroContainer}>
+            {/* Go to Gallery pill button */}
+            <TouchableOpacity
+              style={[
+                styles.galleryPillButton,
+                {
+                  backgroundColor: isDark ? 'rgba(255, 107, 74, 0.16)' : '#FCEEE8',
+                  borderColor: isDark ? 'rgba(255, 107, 74, 0.35)' : '#F6C5B8',
+                },
+              ]}
+              onPress={handleGoToGallery}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Go to Gallery"
+              accessibilityHint="Navigate directly to the photo gallery for this event"
+            >
+              <ImageIcon
+                size={14}
+                color={isDark ? '#FF8A65' : '#161616'}
+                strokeWidth={2}
+                style={styles.galleryPillIconLeft}
+              />
+              <Text style={[styles.galleryPillText, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                Go to Gallery
+              </Text>
+              <ChevronRight
+                size={14}
+                color={isDark ? '#FF8A65' : '#161616'}
+                strokeWidth={2.2}
+                style={styles.galleryPillIconRight}
+              />
+            </TouchableOpacity>
             {/* Background Circular Coral Glow behind camera */}
             <View style={styles.cameraGlowDisc} />
 
@@ -1120,6 +1170,33 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     marginTop: 8,
     maxWidth: '85%',
+  },
+  galleryPillButton: {
+    alignSelf: 'flex-end',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 7,
+    paddingHorizontal: 13,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginTop: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  galleryPillIconLeft: {
+    marginRight: 6,
+  },
+  galleryPillText: {
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontSize: 12.5,
+    lineHeight: 16,
+    letterSpacing: -0.1,
+  },
+  galleryPillIconRight: {
+    marginLeft: 4,
   },
   stickerBadge: {
     alignItems: 'flex-end',
