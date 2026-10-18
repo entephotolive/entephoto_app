@@ -38,7 +38,7 @@ class SonyRemoteSession(
 ) : Closeable {
 
     private val transport = PtpUsbTransport(device, usbManager)
-    private val relativeDir = "DCIM/entephoto/"
+    private val relativeDir = "DCIM/Entephoto/"
 
     /** True if session has successfully completed the 3-stage SDIO handshake. */
     var isConnected: Boolean = false
@@ -424,7 +424,7 @@ class SonyRemoteSession(
         val cv = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir) // "DCIM/entephoto/"
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir) // "DCIM/Entephoto/"
             put(MediaStore.MediaColumns.DATE_ADDED, nowSec)
             put(MediaStore.MediaColumns.DATE_MODIFIED, nowSec)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -480,7 +480,7 @@ class SonyRemoteSession(
     ): ImportRecord {
         val dir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-            "entephoto"
+            "Entephoto"
         )
         dir.mkdirs()
         val dest = File(dir, filename)

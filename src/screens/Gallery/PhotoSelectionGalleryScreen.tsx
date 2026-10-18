@@ -39,6 +39,10 @@ import {
   scanDcimEntephotoPhotos,
   subscribeToDcimPhotos,
   deleteLocalPhoto,
+  PHOTO_STORAGE_DISPLAY_PATH,
+  addPhotoScanListener,
+  isPhotoScanInProgress,
+  getPhotoScanSequenceId,
 } from '@/services/localPhotoService';
 import {
   uploadSinglePhoto,
@@ -247,8 +251,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [activeFilter, setActiveFilter] = useState<FilterTab>('All');
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isPhotoScanning, setIsPhotoScanning] = useState(() => isPhotoScanInProgress());
+  const [hasCompletedInitialScan, setHasCompletedInitialScan] = useState(false);
+  const latestAppliedScanSequenceRef = React.useRef<number>(0);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [initialScanError, setInitialScanError] = useState<string | null>(null);
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
 
   // Uploading state
@@ -563,6 +570,43 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     };
   }, [eventId]);
 
+  // Subscribe to photo scanning / fetching state across all background & foreground triggers
+  useEffect(() => {
+    const unsubscribeScanListener = addPhotoScanListener(scanning => {
+      setIsPhotoScanning(scanning);
+    });
+    return () => {
+      unsubscribeScanListener();
+    };
+  }, []);
+
+  const handleRetryScan = useCallback(async () => {
+    setIsInitialLoading(true);
+    setInitialScanError(null);
+    try {
+      const scanned = await scanDcimEntephotoPhotos();
+      const seq = getPhotoScanSequenceId(scanned);
+      if (seq >= latestAppliedScanSequenceRef.current) {
+        latestAppliedScanSequenceRef.current = seq;
+        const uploadedSet = uploadedPhotoIdsRef.current;
+        const mapped = scanned.map(p =>
+          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+        );
+        photosRef.current = mapped;
+        setPhotos(mapped);
+      }
+      setInitialScanError(null);
+      setHasCompletedInitialScan(true);
+    } catch (err: any) {
+      console.error('[Gallery] Retry scan failed:', err);
+      setInitialScanError(
+        err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
+      );
+    } finally {
+      setIsInitialLoading(false);
+    }
+  }, []);
+
   // Subscribe to real-time DCIM folder changes
   useEffect(() => {
     let isMounted = true;
@@ -571,24 +615,45 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     scanDcimEntephotoPhotos()
       .then(scanned => {
         if (!isMounted) return;
-        const uploadedSet = uploadedPhotoIdsRef.current;
-        const mapped = scanned.map(p =>
-          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-        );
-        photosRef.current = mapped;
-        setPhotos(mapped);
+        const seq = getPhotoScanSequenceId(scanned);
+        if (seq >= latestAppliedScanSequenceRef.current) {
+          latestAppliedScanSequenceRef.current = seq;
+          const uploadedSet = uploadedPhotoIdsRef.current;
+          const mapped = scanned.map(p =>
+            isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+          );
+          photosRef.current = mapped;
+          setPhotos(mapped);
+        }
+        setInitialScanError(null);
         setIsInitialLoading(false);
+        setHasCompletedInitialScan(true);
       })
       .catch(err => {
         console.error('[Gallery] Initial scan failed:', err);
         if (isMounted) {
+          setInitialScanError(
+            err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
+          );
           setIsInitialLoading(false);
+          setHasCompletedInitialScan(true);
         }
       });
 
     const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
       if (!isMounted) return;
       setIsInitialLoading(false);
+      setHasCompletedInitialScan(true);
+      setInitialScanError(null);
+
+      const seq = getPhotoScanSequenceId(dcimPhotos);
+      if (seq < latestAppliedScanSequenceRef.current) {
+        console.log(
+          `[Gallery] Dropping stale photos subscription event (seq #${seq} < latest #${latestAppliedScanSequenceRef.current})`,
+        );
+        return;
+      }
+      latestAppliedScanSequenceRef.current = seq;
 
       // 1. Build merged list synchronously against current photosRef.current
       const currentPhotos = photosRef.current;
@@ -669,17 +734,27 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   // Manual rescan handler
   const handleManualRescan = useCallback(async () => {
-    setIsRefreshing(true);
     try {
       const scanned = await scanDcimEntephotoPhotos();
-      const uploadedSet = uploadedPhotoIdsRef.current;
-      const mapped = scanned.map(p =>
-        isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-      );
-      photosRef.current = mapped;
-      setPhotos(mapped);
-    } finally {
-      setIsRefreshing(false);
+      const seq = getPhotoScanSequenceId(scanned);
+      if (seq >= latestAppliedScanSequenceRef.current) {
+        latestAppliedScanSequenceRef.current = seq;
+        const uploadedSet = uploadedPhotoIdsRef.current;
+        const mapped = scanned.map(p =>
+          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+        );
+        photosRef.current = mapped;
+        setPhotos(mapped);
+      }
+      setInitialScanError(null);
+      setHasCompletedInitialScan(true);
+    } catch (err: any) {
+      console.error('[Gallery] Rescan failed:', err);
+      if (photosRef.current.length === 0) {
+        setInitialScanError(
+          err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
+        );
+      }
     }
   }, []);
 
@@ -1825,10 +1900,18 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           </View>
         )}
 
-        {/* ── TOP LOADING SPINNER (Visible during initial photo scanning) ── */}
-        {isInitialLoading && (
-          <View style={styles.topSpinnerContainer}>
+        {/* ── TOP REFRESH SPINNER (Visible during subsequent background or manual refreshes when photos exist) ── */}
+        {isPhotoScanning && photos.length > 0 && (
+          <View
+            style={styles.topSpinnerContainer}
+            pointerEvents="none"
+            accessibilityRole="progressbar"
+            accessibilityLabel="Refreshing photos"
+          >
             <ActivityIndicator size="small" color={isDark ? '#818CF8' : '#6366F1'} />
+            <Text style={[styles.topSpinnerText, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
+              Refreshing photos…
+            </Text>
           </View>
         )}
 
@@ -1836,8 +1919,22 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <SectionList<GallerySectionRow, GalleryBatchSection>
           sections={gallerySections}
           extraData={useMemo(
-            () => [selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, isInitialLoading],
-            [selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, isInitialLoading],
+            () => [
+              selectedPhotoIds,
+              favoritePhotoIds,
+              uploadedPhotoIds,
+              isInitialLoading,
+              isPhotoScanning,
+              initialScanError,
+            ],
+            [
+              selectedPhotoIds,
+              favoritePhotoIds,
+              uploadedPhotoIds,
+              isInitialLoading,
+              isPhotoScanning,
+              initialScanError,
+            ],
           )}
           keyExtractor={item => item.rowKey}
           renderItem={renderSectionItem}
@@ -1854,8 +1951,64 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           scrollEnabled={gallerySections.length > 0}
           stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => {
-            if (isInitialLoading) {
-              return null;
+            if (isInitialLoading || (isPhotoScanning && !hasCompletedInitialScan)) {
+              return (
+                <View style={styles.loadingContainer}>
+                  <View
+                    style={[
+                      styles.loadingIconCircle,
+                      { backgroundColor: isDark ? '#26262E' : '#F4F4F5' },
+                    ]}
+                  >
+                    <ActivityIndicator size="large" color={isDark ? '#818CF8' : '#6366F1'} />
+                  </View>
+                  <Text style={[styles.loadingTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Loading Photos
+                  </Text>
+                  <Text style={[styles.loadingSubtitle, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
+                    Scanning {PHOTO_STORAGE_DISPLAY_PATH}...
+                  </Text>
+                </View>
+              );
+            }
+
+            if (initialScanError) {
+              return (
+                <View style={styles.errorContainer}>
+                  <View
+                    style={[
+                      styles.errorIconCircle,
+                      { backgroundColor: isDark ? '#3E2222' : '#FEE2E2' },
+                    ]}
+                  >
+                    <AlertTriangle size={34} color="#EF4444" strokeWidth={1.8} />
+                  </View>
+                  <Text style={[styles.errorTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Unable to Load Photos
+                  </Text>
+                  <Text style={[styles.errorSubtitle, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
+                    {initialScanError}
+                  </Text>
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handleRetryScan}
+                    style={[
+                      styles.errorRetryButton,
+                      { backgroundColor: isDark ? '#26262E' : '#1A1A1E' },
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry scanning photos"
+                  >
+                    <RefreshCw
+                      size={18}
+                      color="#FFFFFF"
+                      strokeWidth={2.2}
+                      style={{ marginRight: 8 }}
+                    />
+                    <Text style={styles.errorRetryButtonText}>Retry Scan</Text>
+                  </TouchableOpacity>
+                </View>
+              );
             }
 
             if (activeFilter === 'Favorites') {
@@ -1958,22 +2111,27 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={handleManualRescan}
-                  disabled={isRefreshing}
                   style={[
                     styles.emptyRefreshBtn,
                     {
                       backgroundColor: isDark ? '#26262E' : '#1A1A1E',
                     },
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Rescan photos"
                 >
-                  <RefreshCw
-                    size={20}
-                    color="#FFFFFF"
-                    strokeWidth={2.2}
-                    style={{ marginRight: 12 }}
-                  />
+                  {isPhotoScanning ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 12 }} />
+                  ) : (
+                    <RefreshCw
+                      size={20}
+                      color="#FFFFFF"
+                      strokeWidth={2.2}
+                      style={{ marginRight: 12 }}
+                    />
+                  )}
                   <Text style={styles.emptyRefreshBtnText}>
-                    {isRefreshing ? 'Scanning...' : 'Rescan Photos'}
+                    {isPhotoScanning ? 'Scanning...' : 'Rescan Photos'}
                   </Text>
                   <ArrowRight
                     size={20}
@@ -2726,9 +2884,16 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   topSpinnerContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  topSpinnerText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 12,
+    letterSpacing: -0.1,
   },
 
   // ── 3. Photo Grid Styles ──
@@ -3666,5 +3831,80 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     flexShrink: 0,
+  },
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 24,
+  },
+  loadingIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  loadingTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: '700',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  loadingSubtitle: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  errorContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 48,
+    paddingHorizontal: 24,
+  },
+  errorIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  errorTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: '700',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  errorSubtitle: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '500',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  errorRetryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+    borderRadius: 14,
+  },
+  errorRetryButtonText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

@@ -13,7 +13,7 @@ function makePhoto(id: string, filename: string, capturedAt?: number): GalleryPh
   return {
     id,
     filename,
-    uri: `file:///sdcard/DCIM/entephoto/${filename}`,
+    uri: `file:///sdcard/DCIM/Entephoto/${filename}`,
     isRaw: filename.toLowerCase().endsWith('.arw'),
     status: 'new',
     selected: false,

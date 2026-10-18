@@ -70,18 +70,24 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
   }
 
   const extension = uriKey ? (uriKey.split('.').pop() || '').toUpperCase() : '';
+  const displayFilename = uriKey ? decodeURIComponent(uriKey.split('/').pop() || '') : '';
   const isRawFormat = [
     'ARW',
     'CR2',
     'CR3',
+    'CRW',
     'NEF',
+    'NRW',
     'DNG',
+    'RAW',
     'RW2',
     'ORF',
     'RAF',
     'SRW',
     'PEF',
     'HIF',
+    'HEIC',
+    'HEIF',
     'TIF',
     'TIFF',
   ].includes(extension);
@@ -163,6 +169,15 @@ export const ImageWithSkeleton: React.FC<ImageWithSkeletonProps> = ({
           >
             {isRawFormat ? 'RAW format' : 'No preview'}
           </Text>
+          {displayFilename ? (
+            <Text
+              style={[styles.filenameSubText, { color: isDark ? '#8E8E93' : '#736B63' }]}
+              numberOfLines={1}
+              ellipsizeMode="middle"
+            >
+              {displayFilename}
+            </Text>
+          ) : null}
         </View>
       ) : (
         /* expo-image — performs decode-time downscaling via Glide on Android */
@@ -229,5 +244,13 @@ const styles = StyleSheet.create({
     fontSize: 8,
     marginTop: 2,
     fontWeight: '500',
+  },
+  filenameSubText: {
+    fontSize: 7.5,
+    marginTop: 2,
+    fontWeight: '400',
+    paddingHorizontal: 4,
+    textAlign: 'center',
+    maxWidth: '100%',
   },
 });

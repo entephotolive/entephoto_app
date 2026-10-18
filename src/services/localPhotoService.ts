@@ -16,18 +16,25 @@ const SUPPORTED_EXTENSIONS = [
   '.arw',
   '.cr2',
   '.cr3',
+  '.crw',
   '.nef',
+  '.nrw',
   '.dng',
-  '.heic',
-  '.hif',
-  '.webp',
-  '.tif',
-  '.tiff',
+  '.raw',
   '.rw2',
   '.orf',
   '.raf',
   '.srw',
   '.pef',
+  '.heic',
+  '.heif',
+  '.hif',
+  '.webp',
+  '.avif',
+  '.bmp',
+  '.gif',
+  '.tif',
+  '.tiff',
 ];
 
 // Genuine RAW Camera Extensions
@@ -35,8 +42,11 @@ const RAW_EXTENSIONS = [
   '.arw',
   '.cr2',
   '.cr3',
+  '.crw',
   '.nef',
+  '.nrw',
   '.dng',
+  '.raw',
   '.rw2',
   '.orf',
   '.raf',
@@ -44,10 +54,71 @@ const RAW_EXTENSIONS = [
   '.pef',
 ];
 
+let directoryInitPromise: Promise<boolean> | null = null;
+
+/**
+ * Ensures the canonical DCIM/Entephoto directory exists on the device.
+ * Idempotent: checks existence before creating, safe to call repeatedly.
+ * Returns true if the directory exists or was created successfully.
+ */
+export async function ensurePhotoDirectoryExists(silent: boolean = false): Promise<boolean> {
+  if (directoryInitPromise) {
+    return directoryInitPromise;
+  }
+
+  directoryInitPromise = (async () => {
+    if (Platform.OS !== 'android') {
+      return true;
+    }
+
+    try {
+      const hasPermission = silent
+        ? await checkStoragePermission()
+        : await requestStoragePermission();
+
+      if (!hasPermission) {
+        if (!silent) {
+          console.warn(
+            `[LocalPhotoService] Storage permission denied. Cannot initialize ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
+          );
+        }
+        return false;
+      }
+
+      const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+      if (!dir.exists) {
+        dir.create({ intermediates: true });
+        console.log(`[LocalPhotoService] Created canonical directory: ${CANONICAL_DCIM_DIR_URI}`);
+      }
+      return true;
+    } catch (error) {
+      console.error(
+        `[LocalPhotoService] Failed to ensure canonical directory exists at ${CANONICAL_DCIM_DIR_URI}:`,
+        error,
+      );
+      return false;
+    }
+  })();
+
+  const success = await directoryInitPromise;
+  if (!success) {
+    // Reset so subsequent attempts (e.g. after user grants permission or retries) can re-run
+    directoryInitPromise = null;
+  }
+  return success;
+}
+
+export function resetDirectoryInitPromise(): void {
+  directoryInitPromise = null;
+}
+
 /**
  * Checks if a filename is a supported image file
  */
 function isPhotoFile(name: string): boolean {
+  if (!name || name.startsWith('.')) {
+    return false;
+  }
   const lower = name.toLowerCase();
   return SUPPORTED_EXTENSIONS.some(ext => lower.endsWith(ext));
 }
@@ -56,6 +127,9 @@ function isPhotoFile(name: string): boolean {
  * Checks if a filename is a genuine camera RAW format
  */
 function isRawPhoto(name: string): boolean {
+  if (!name || name.startsWith('.')) {
+    return false;
+  }
   const lower = name.toLowerCase();
   return RAW_EXTENSIONS.some(ext => lower.endsWith(ext));
 }
@@ -140,6 +214,54 @@ async function requestStoragePermission(): Promise<boolean> {
   }
 }
 
+// ── Shared Photo Scan State & Concurrency Control ────────────────────────────
+let activeScanCount = 0;
+let currentScanSequenceId = 0;
+const scanListeners = new Set<(isScanning: boolean) => void>();
+
+function notifyScanListeners(): void {
+  const isScanning = activeScanCount > 0;
+  scanListeners.forEach(listener => {
+    try {
+      listener(isScanning);
+    } catch (e) {
+      console.error('[LocalPhotoService] Error in photo scan listener:', e);
+    }
+  });
+}
+
+/**
+ * Subscribes to active photo scan / fetch state transitions across the application.
+ * Immediately invokes the listener with the current state.
+ * Returns an unsubscribe callback.
+ */
+export function addPhotoScanListener(listener: (isScanning: boolean) => void): () => void {
+  scanListeners.add(listener);
+  try {
+    listener(activeScanCount > 0);
+  } catch (e) {
+    console.error('[LocalPhotoService] Error invoking scan listener on registration:', e);
+  }
+  return () => {
+    scanListeners.delete(listener);
+  };
+}
+
+/**
+ * Returns true if any photo scanning, fetching, or directory reading operation is currently running.
+ */
+export function isPhotoScanInProgress(): boolean {
+  return activeScanCount > 0;
+}
+
+/**
+ * Helper to retrieve the scan sequence ID attached to a scanned photo list.
+ * Newer scans have higher sequence IDs, preventing older results from overwriting newer data.
+ */
+export function getPhotoScanSequenceId(photos: GalleryPhotoItem[]): number {
+  return (photos as any)?.scanSequenceId ?? 0;
+}
+
 /**
  * Scans the configured photo storage directory using Expo SDK 57 Directory API.
  *
@@ -162,46 +284,39 @@ export async function scanDcimEntephotoPhotos(
     return [];
   }
 
-  const hasPermission = silent ? await checkStoragePermission() : await requestStoragePermission();
-  if (!hasPermission) {
-    if (!silent) {
-      console.warn(
-        `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
-      );
-    }
-    return [];
-  }
+  const sequenceId = ++currentScanSequenceId;
+  activeScanCount++;
+  notifyScanListeners();
 
   try {
-    const candidateUris = Array.from(
-      new Set([
-        CANONICAL_DCIM_DIR_URI,
-        'file:///sdcard/DCIM/entephoto',
-        'file:///sdcard/DCIM/Entephoto',
-      ]),
-    );
-
-    const fileMap = new Map<string, File>();
-
-    for (const uri of candidateUris) {
-      try {
-        const dir = new Directory(uri);
-        if (dir.exists) {
-          const entries = dir.list();
-          for (const entry of entries) {
-            if (entry instanceof File && isPhotoFile(entry.name)) {
-              if (!fileMap.has(entry.name)) {
-                fileMap.set(entry.name, entry);
-              }
-            }
-          }
+    // 1. Ensure canonical directory exists and storage permission is granted
+    const initialized = await ensurePhotoDirectoryExists(silent);
+    if (!initialized) {
+      const hasPermission = await checkStoragePermission();
+      if (!hasPermission) {
+        if (!silent) {
+          console.warn(
+            `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
+          );
         }
-      } catch {
-        // Individual directory access error, continue scanning others
+        throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
       }
+      throw new Error(`Failed to access or create ${PHOTO_STORAGE_DISPLAY_PATH}`);
     }
 
-    const photoEntries = Array.from(fileMap.values());
+    const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+    if (!dir.exists) {
+      throw new Error(`Directory ${PHOTO_STORAGE_DISPLAY_PATH} does not exist`);
+    }
+
+    const entries = dir.list();
+    const photoEntries: File[] = [];
+
+    for (const entry of entries) {
+      if (entry instanceof File && isPhotoFile(entry.name)) {
+        photoEntries.push(entry);
+      }
+    }
 
     const scannedPhotos: GalleryPhotoItem[] = photoEntries.map(file => {
       const isRaw = isRawPhoto(file.name);
@@ -237,7 +352,9 @@ export async function scanDcimEntephotoPhotos(
     });
 
     if (scannedPhotos.length > 0 && !silent) {
-      console.log(`[LocalPhotoService] Scanned ${scannedPhotos.length} photos.`);
+      console.log(
+        `[LocalPhotoService] Scanned ${scannedPhotos.length} photos (seq #${sequenceId}).`,
+      );
     }
 
     // Preserve the correct chronological order (newest first) with deterministic tiebreaking
@@ -250,33 +367,30 @@ export async function scanDcimEntephotoPhotos(
       return (b.filename || b.id).localeCompare(a.filename || a.id);
     });
 
+    // Tag the scanned result array with its unique sequence ID for safe concurrency
+    (scannedPhotos as any).scanSequenceId = sequenceId;
+
     return scannedPhotos;
   } catch (error: any) {
     console.error(
       `[LocalPhotoService] Failed to read directory at ${CANONICAL_DCIM_DIR_URI}:`,
       error?.message || error,
     );
-    return [];
+    throw error;
+  } finally {
+    activeScanCount = Math.max(0, activeScanCount - 1);
+    notifyScanListeners();
   }
 }
 
 /**
  * Subscribes to real-time additions/modifications in the DCIM folder.
  *
- * POLLING DESIGN — NON-OVERLAPPING:
- * The previous implementation used setInterval(scanAndNotify, 2000). Because
- * scanDcimEntephotoPhotos takes 26–32 seconds per call, setInterval spawned a new
- * overlapping scan every 2 seconds without waiting for the previous one to finish.
- * After 60 seconds of the gallery being open, 30+ concurrent scan operations were
- * running simultaneously, saturating the JS bridge and causing all UI interactions
- * (menus, taps, navigation) to freeze.
- *
- * The new design uses a recursive setTimeout loop: the next scan is only scheduled
- * AFTER the current scan finishes. This guarantees zero overlapping scans.
- *
- * The Directory.watch() native watcher is preserved for instant notification of
- * new photos being added by the camera, but it is also guarded against launching
- * a new scan while one is already running.
+ * POLLING & EVENT DESIGN:
+ * - Uses non-overlapping scan scheduling with a recursive setTimeout loop.
+ * - Flags pending scans when triggers arrive while an active scan is running.
+ * - Debounces rapid native watcher and onPhotoSaved events (150ms) to avoid jitter.
+ * - Guards against older async scan responses overwriting newer photo data via sequence IDs.
  */
 export function subscribeToDcimPhotos(
   onPhotosUpdated: (photos: GalleryPhotoItem[]) => void,
@@ -284,10 +398,13 @@ export function subscribeToDcimPhotos(
 ): () => void {
   let isSubscribed = true;
   let isScanning = false;
+  let hasPendingScan = false;
   let watcherSubscription: { remove: () => void } | null = null;
   let photoSavedSub: { remove: () => void } | null = null;
   let nextPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSignature = '';
+  let latestAppliedSequence = 0;
 
   const scheduleNextPoll = () => {
     if (!isSubscribed) return;
@@ -297,29 +414,61 @@ export function subscribeToDcimPhotos(
   };
 
   const runScan = async (silent: boolean) => {
-    // Strict guard: never run two scans concurrently.
-    if (!isSubscribed || isScanning) return;
+    if (!isSubscribed) return;
+    if (isScanning) {
+      hasPendingScan = true;
+      return;
+    }
     isScanning = true;
     try {
       const photos = await scanDcimEntephotoPhotos(silent);
       if (!isSubscribed) return;
 
-      // Only notify the subscriber when the set of photo URIs has actually changed.
-      // Joining all URIs into a string is O(N) but far cheaper than re-rendering
-      // 466+ gallery tiles when nothing has changed.
-      const signature = photos.map(p => p.uri).join('|');
-      if (signature !== lastSignature) {
-        lastSignature = signature;
-        console.log(`[LocalPhotoService] Emitting ${photos.length} updated photos to gallery`);
-        onPhotosUpdated(photos);
+      const seq = getPhotoScanSequenceId(photos);
+      if (seq >= latestAppliedSequence) {
+        latestAppliedSequence = seq;
+        // Only notify the subscriber when the set of photo URIs has actually changed.
+        const signature = photos.map(p => p.uri).join('|');
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          console.log(
+            `[LocalPhotoService] Emitting ${photos.length} updated photos (seq #${seq}) to gallery`,
+          );
+          onPhotosUpdated(photos);
+        }
+      } else {
+        console.log(
+          `[LocalPhotoService] Dropping stale scan result (seq #${seq} < latest #${latestAppliedSequence})`,
+        );
       }
     } catch (error) {
       console.error('[LocalPhotoService] Error during scan:', error);
     } finally {
       isScanning = false;
-      // Schedule the next poll only after this one has fully completed.
-      scheduleNextPoll();
+      if (isSubscribed) {
+        if (hasPendingScan) {
+          hasPendingScan = false;
+          Promise.resolve().then(() => runScan(true));
+        } else {
+          scheduleNextPoll();
+        }
+      }
     }
+  };
+
+  const triggerDebouncedScan = () => {
+    if (!isSubscribed) return;
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      if (nextPollTimer !== null) {
+        clearTimeout(nextPollTimer);
+        nextPollTimer = null;
+      }
+      runScan(true);
+    }, 150);
   };
 
   // 1. Initial scan on subscription start (shows permission dialog if needed).
@@ -333,19 +482,17 @@ export function subscribeToDcimPhotos(
       console.error('[LocalPhotoService] Permission request failed:', err);
     });
 
-  // 2. Set up native directory watcher for instant notification of new camera photos.
+  // 2. Set up native directory watcher on the canonical folder for instant notification of new camera photos.
   if (Platform.OS === 'android') {
     try {
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
       if (dir.exists) {
         watcherSubscription = dir.watch(() => {
-          if (!isScanning && isSubscribed) {
-            console.log('[LocalPhotoService] Directory change detected, triggering scan.');
-            if (nextPollTimer !== null) {
-              clearTimeout(nextPollTimer);
-              nextPollTimer = null;
-            }
-            runScan(true);
+          if (isSubscribed) {
+            console.log(
+              '[LocalPhotoService] Directory change detected, triggering debounced scan.',
+            );
+            triggerDebouncedScan();
           }
         });
       }
@@ -362,13 +509,11 @@ export function subscribeToDcimPhotos(
         console.log(
           '[LocalPhotoService] onPhotoSaved event received:',
           event.filename,
-          '— triggering immediate scan',
+          '— triggering debounced scan',
         );
-        if (nextPollTimer !== null) {
-          clearTimeout(nextPollTimer);
-          nextPollTimer = null;
+        if (isSubscribed) {
+          triggerDebouncedScan();
         }
-        runScan(true);
       });
     } catch (err) {
       console.warn('[LocalPhotoService] Failed to bind addPhotoSavedListener:', err);
@@ -377,6 +522,11 @@ export function subscribeToDcimPhotos(
 
   return () => {
     isSubscribed = false;
+    hasPendingScan = false;
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     if (nextPollTimer !== null) {
       clearTimeout(nextPollTimer);
       nextPollTimer = null;
