@@ -53,6 +53,7 @@ import {
 import { storageService } from '@/services/storageService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
+import { Image as ExpoImage } from 'expo-image';
 import { ImageWithSkeleton } from './components/ImageWithSkeleton';
 import {
   RuntimeBatch,
@@ -254,6 +255,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [isPhotoScanning, setIsPhotoScanning] = useState(() => isPhotoScanInProgress());
   const [hasCompletedInitialScan, setHasCompletedInitialScan] = useState(false);
   const latestAppliedScanSequenceRef = React.useRef<number>(0);
+  const hasCompletedInitialScanRef = React.useRef(false);
+  const isDockVisibleRef = React.useRef(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [initialScanError, setInitialScanError] = useState<string | null>(null);
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
@@ -580,23 +583,95 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     };
   }, []);
 
+  // Helper to merge newly scanned photos with authoritative upload state and queue uploads
+  const applyScannedPhotos = useCallback((scanned: GalleryPhotoItem[]) => {
+    const seq = getPhotoScanSequenceId(scanned);
+    if (seq < latestAppliedScanSequenceRef.current) {
+      console.log(
+        `[Gallery] Dropping stale photos event (seq #${seq} < latest #${latestAppliedScanSequenceRef.current})`,
+      );
+      return;
+    }
+    latestAppliedScanSequenceRef.current = seq;
+
+    const currentPhotos = photosRef.current;
+    const uploadedSet = uploadedPhotoIdsRef.current;
+    let merged: GalleryPhotoItem[];
+
+    if (currentPhotos.length === 0) {
+      merged = scanned.map(p =>
+        isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
+      );
+    } else {
+      const prevMap = new Map<string, GalleryPhotoItem>();
+      for (const p of currentPhotos) {
+        prevMap.set(p.id, p);
+        if (p.uri) {
+          prevMap.set(p.uri, p);
+        }
+      }
+
+      merged = scanned.map(item => {
+        const existing = prevMap.get(item.id) || prevMap.get(item.uri);
+        const isUploaded =
+          isPhotoInUploadedSet(item, uploadedSet) || existing?.status === 'uploaded';
+
+        if (existing) {
+          if (isUploaded && existing.status !== 'uploaded') {
+            return { ...existing, status: 'uploaded' };
+          }
+          return existing;
+        }
+        if (isUploaded) {
+          return { ...item, status: 'uploaded' };
+        }
+        return item;
+      });
+    }
+
+    // Check if anything actually changed
+    const isSame =
+      merged.length === currentPhotos.length &&
+      merged.every((item, i) => item === currentPhotos[i]);
+
+    if (!isSame) {
+      photosRef.current = merged;
+      setPhotos(merged);
+    }
+
+    // OUTSIDE setPhotos updater: if All Upload is active, queue newly arrived unuploaded photos
+    if (isAllUploadActiveRef.current) {
+      let hasNewQueueItems = false;
+      merged.forEach(p => {
+        const isUploaded = isPhotoInUploadedSet(p, uploadedSet);
+
+        if (
+          !isUploaded &&
+          !allUploadFailedIdsRef.current.has(p.id) &&
+          !allUploadQueueRef.current.includes(p.id) &&
+          currentUploadingPhotoIdRef.current !== p.id
+        ) {
+          console.log(`[AllUpload] Appending new arrival to queue: ${p.filename || p.id}`);
+          allUploadQueueRef.current.push(p.id);
+          hasNewQueueItems = true;
+        }
+      });
+
+      if (hasNewQueueItems && !isAllUploadPausedRef.current) {
+        processAllUploadQueueRef.current?.();
+      }
+    }
+  }, []);
+
   const handleRetryScan = useCallback(async () => {
     setIsInitialLoading(true);
     setInitialScanError(null);
     try {
-      const scanned = await scanDcimEntephotoPhotos();
-      const seq = getPhotoScanSequenceId(scanned);
-      if (seq >= latestAppliedScanSequenceRef.current) {
-        latestAppliedScanSequenceRef.current = seq;
-        const uploadedSet = uploadedPhotoIdsRef.current;
-        const mapped = scanned.map(p =>
-          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-        );
-        photosRef.current = mapped;
-        setPhotos(mapped);
-      }
+      const scanned = await scanDcimEntephotoPhotos(false, true);
+      applyScannedPhotos(scanned);
       setInitialScanError(null);
       setHasCompletedInitialScan(true);
+      hasCompletedInitialScanRef.current = true;
     } catch (err: any) {
       console.error('[Gallery] Retry scan failed:', err);
       setInitialScanError(
@@ -605,149 +680,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     } finally {
       setIsInitialLoading(false);
     }
-  }, []);
+  }, [applyScannedPhotos]);
 
-  // Subscribe to real-time DCIM folder changes
-  useEffect(() => {
-    let isMounted = true;
-
-    // Run initial scan to guarantee initial loading lifecycle finishes even if folder is empty
-    scanDcimEntephotoPhotos()
-      .then(scanned => {
-        if (!isMounted) return;
-        const seq = getPhotoScanSequenceId(scanned);
-        if (seq >= latestAppliedScanSequenceRef.current) {
-          latestAppliedScanSequenceRef.current = seq;
-          const uploadedSet = uploadedPhotoIdsRef.current;
-          const mapped = scanned.map(p =>
-            isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-          );
-          photosRef.current = mapped;
-          setPhotos(mapped);
-        }
-        setInitialScanError(null);
-        setIsInitialLoading(false);
-        setHasCompletedInitialScan(true);
-      })
-      .catch(err => {
-        console.error('[Gallery] Initial scan failed:', err);
-        if (isMounted) {
-          setInitialScanError(
-            err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
-          );
-          setIsInitialLoading(false);
-          setHasCompletedInitialScan(true);
-        }
-      });
-
-    const unsubscribe = subscribeToDcimPhotos(dcimPhotos => {
-      if (!isMounted) return;
-      setIsInitialLoading(false);
-      setHasCompletedInitialScan(true);
-      setInitialScanError(null);
-
-      const seq = getPhotoScanSequenceId(dcimPhotos);
-      if (seq < latestAppliedScanSequenceRef.current) {
-        console.log(
-          `[Gallery] Dropping stale photos subscription event (seq #${seq} < latest #${latestAppliedScanSequenceRef.current})`,
-        );
-        return;
-      }
-      latestAppliedScanSequenceRef.current = seq;
-
-      // 1. Build merged list synchronously against current photosRef.current
-      const currentPhotos = photosRef.current;
-      const uploadedSet = uploadedPhotoIdsRef.current;
-      let merged: GalleryPhotoItem[];
-
-      if (currentPhotos.length === 0) {
-        merged = dcimPhotos.map(p =>
-          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-        );
-      } else {
-        const prevMap = new Map<string, GalleryPhotoItem>();
-        for (const p of currentPhotos) {
-          prevMap.set(p.id, p);
-          if (p.uri) {
-            prevMap.set(p.uri, p);
-          }
-        }
-
-        merged = dcimPhotos.map(item => {
-          const existing = prevMap.get(item.id) || prevMap.get(item.uri);
-          const isUploaded =
-            isPhotoInUploadedSet(item, uploadedSet) || existing?.status === 'uploaded';
-
-          if (existing) {
-            if (isUploaded && existing.status !== 'uploaded') {
-              return { ...existing, status: 'uploaded' };
-            }
-            return existing;
-          }
-          if (isUploaded) {
-            return { ...item, status: 'uploaded' };
-          }
-          return item;
-        });
-      }
-
-      // Check if anything actually changed
-      const isSame =
-        merged.length === currentPhotos.length &&
-        merged.every((item, i) => item === currentPhotos[i]);
-
-      if (!isSame) {
-        // Immediately synchronize photosRef.current before queueing or triggering upload worker
-        photosRef.current = merged;
-        setPhotos(merged);
-      }
-
-      // 2. OUTSIDE setPhotos updater: if All Upload is active, queue newly arrived unuploaded photos
-      if (isAllUploadActiveRef.current) {
-        let hasNewQueueItems = false;
-        merged.forEach(p => {
-          const isUploaded = isPhotoInUploadedSet(p, uploadedSet);
-
-          if (
-            !isUploaded &&
-            !allUploadFailedIdsRef.current.has(p.id) &&
-            !allUploadQueueRef.current.includes(p.id) &&
-            currentUploadingPhotoIdRef.current !== p.id
-          ) {
-            console.log(`[AllUpload] Appending new arrival to queue: ${p.filename || p.id}`);
-            allUploadQueueRef.current.push(p.id);
-            hasNewQueueItems = true;
-          }
-        });
-
-        if (hasNewQueueItems && !isAllUploadPausedRef.current) {
-          processAllUploadQueueRef.current?.();
-        }
-      }
-    }, 2000);
-
-    return () => {
-      isMounted = false;
-      unsubscribe();
-    };
-  }, []);
-
-  // Manual rescan handler
+  // Manual rescan handler (explicit full scan from Action Sheet)
   const handleManualRescan = useCallback(async () => {
     try {
-      const scanned = await scanDcimEntephotoPhotos();
-      const seq = getPhotoScanSequenceId(scanned);
-      if (seq >= latestAppliedScanSequenceRef.current) {
-        latestAppliedScanSequenceRef.current = seq;
-        const uploadedSet = uploadedPhotoIdsRef.current;
-        const mapped = scanned.map(p =>
-          isPhotoInUploadedSet(p, uploadedSet) ? { ...p, status: 'uploaded' as const } : p,
-        );
-        photosRef.current = mapped;
-        setPhotos(mapped);
-      }
+      const scanned = await scanDcimEntephotoPhotos(false, true);
+      applyScannedPhotos(scanned);
       setInitialScanError(null);
       setHasCompletedInitialScan(true);
+      hasCompletedInitialScanRef.current = true;
     } catch (err: any) {
       console.error('[Gallery] Rescan failed:', err);
       if (photosRef.current.length === 0) {
@@ -756,7 +698,51 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         );
       }
     }
-  }, []);
+  }, [applyScannedPhotos]);
+
+  // Subscribe to real-time DCIM folder changes (event-driven, no 2-second polling)
+  useEffect(() => {
+    let isMounted = true;
+
+    const unsubscribe = subscribeToDcimPhotos(
+      dcimPhotos => {
+        if (!isMounted) return;
+        setIsInitialLoading(false);
+        setHasCompletedInitialScan(true);
+        hasCompletedInitialScanRef.current = true;
+        setInitialScanError(null);
+        applyScannedPhotos(dcimPhotos);
+      },
+      {
+        onError: (err: any) => {
+          if (!isMounted) return;
+          console.error('[Gallery] Subscription scan failed:', err);
+          setInitialScanError(
+            err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
+          );
+          setIsInitialLoading(false);
+          setHasCompletedInitialScan(true);
+          hasCompletedInitialScanRef.current = true;
+        },
+      },
+    );
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [applyScannedPhotos]);
+
+  // Reconcile on screen focus (only if initial loading has already finished)
+  useEffect(() => {
+    const unsubscribeFocus = navigation.addListener('focus', () => {
+      if (hasCompletedInitialScanRef.current) {
+        console.log('[Gallery] Screen focused — running reconciliation scan');
+        handleManualRescan();
+      }
+    });
+    return unsubscribeFocus;
+  }, [navigation, handleManualRescan]);
 
   // Dynamic live counts based on real photos
   const totalCount = photos.length;
@@ -1495,24 +1481,43 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     [executeUploadBatch, uploadedPhotoIds],
   );
 
-  // Floating Dock Animation & Favorite Logic
+  // Floating Dock Animation & Visibility Transition
+  const isDockVisible = selectedCount > 0 || isUploading;
 
   useEffect(() => {
-    if (selectedCount > 0 || isUploading) {
-      Animated.spring(dockSlideAnim, {
-        toValue: 1,
-        useNativeDriver: true,
-        damping: 24,
-        stiffness: 250,
-      }).start();
-    } else {
-      Animated.timing(dockSlideAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+    // Only animate when transitioning between hidden and visible states
+    if (isDockVisible === isDockVisibleRef.current) {
+      return;
     }
-  }, [selectedCount, isUploading, dockSlideAnim]);
+    isDockVisibleRef.current = isDockVisible;
+
+    const anim = isDockVisible
+      ? Animated.spring(dockSlideAnim, {
+          toValue: 1,
+          useNativeDriver: true,
+          damping: 24,
+          stiffness: 250,
+        })
+      : Animated.timing(dockSlideAnim, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        });
+
+    anim.start();
+
+    return () => {
+      anim.stop();
+    };
+  }, [isDockVisible, dockSlideAnim]);
+
+  // Efficiently derive the first selected photo for the dock thumbnail without full array scans
+  const firstSelectedPhoto = useMemo(() => {
+    if (selectedPhotoIds.size === 0) return null;
+    const firstId = selectedPhotoIds.values().next().value;
+    if (!firstId) return null;
+    return photos.find(p => p.id === firstId) || null;
+  }, [selectedPhotoIds, photos]);
 
   useEffect(() => {
     if (!isUploading) {
@@ -2162,7 +2167,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               ],
             },
           ]}
-          pointerEvents={selectedCount > 0 || isUploading ? 'box-none' : 'none'}
+          pointerEvents={isDockVisible ? 'box-none' : 'none'}
         >
           <View
             style={[
@@ -2323,23 +2328,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                       ]}
                     >
                       <Images size={18} color={isDark ? '#F4F4F5' : '#161616'} strokeWidth={1.5} />
-                      {selectedCount > 0 &&
-                        Array.from(selectedPhotoIds)
-                          .slice(0, 1)
-                          .map(id => {
-                            const photo = photos.find(p => p.id === id);
-                            if (photo) {
-                              return (
-                                <ImageWithSkeleton
-                                  key={photo.id}
-                                  source={{ uri: photo.uri }}
-                                  style={styles.dockThumbnailImage}
-                                  resizeMode="cover"
-                                />
-                              );
-                            }
-                            return null;
-                          })}
+                      {firstSelectedPhoto && (
+                        <DockThumbnail key={firstSelectedPhoto.id} uri={firstSelectedPhoto.uri} />
+                      )}
                     </View>
                   </View>
 
@@ -2351,13 +2342,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                       ]}
                       numberOfLines={1}
                     >
-                      {selectedCount} selected
+                      {selectedCount}
                     </Text>
                     <Text
                       style={[styles.dockSecondaryText, { color: isDark ? '#A1A1AA' : '#71717A' }]}
                       numberOfLines={1}
                     >
-                      Ready to upload
+                      Selected
                     </Text>
                   </View>
                 </View>
@@ -2466,6 +2457,26 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 };
 
 // ── Memoized Components for Scroll Performance ──
+
+const DockThumbnail = React.memo(({ uri }: { uri: string }) => {
+  const [hasError, setHasError] = useState(false);
+
+  if (hasError) {
+    return null;
+  }
+
+  return (
+    <ExpoImage
+      source={{ uri }}
+      style={styles.dockThumbnailImage}
+      contentFit="cover"
+      cachePolicy="disk"
+      onError={() => setHasError(true)}
+      accessibilityIgnoresInvertColors
+    />
+  );
+});
+DockThumbnail.displayName = 'DockThumbnail';
 
 const MemoizedPhotoTile = React.memo(
   ({

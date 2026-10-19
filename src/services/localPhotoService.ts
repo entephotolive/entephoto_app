@@ -1,5 +1,5 @@
 import { Platform, PermissionsAndroid } from 'react-native';
-import { Directory, File } from 'expo-file-system';
+import { Directory, File, type WatchEvent, type WatchSubscription } from 'expo-file-system';
 import { addPhotoSavedListener } from 'entephoto-camera';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
 import { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH } from '@/config/photo.config';
@@ -218,6 +218,8 @@ async function requestStoragePermission(): Promise<boolean> {
 let activeScanCount = 0;
 let currentScanSequenceId = 0;
 const scanListeners = new Set<(isScanning: boolean) => void>();
+let inFlightScanPromise: Promise<GalleryPhotoItem[]> | null = null;
+const cachedPhotosMap = new Map<string, GalleryPhotoItem>();
 
 function notifyScanListeners(): void {
   const isScanning = activeScanCount > 0;
@@ -263,283 +265,425 @@ export function getPhotoScanSequenceId(photos: GalleryPhotoItem[]): number {
 }
 
 /**
+ * Sorts photo items chronologically (newest first) with deterministic filename tiebreaking.
+ */
+function sortPhotosChronological(photos: GalleryPhotoItem[]): void {
+  photos.sort((a, b) => {
+    const timeA = a.capturedAt ?? 0;
+    const timeB = b.capturedAt ?? 0;
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+    return (b.filename || b.id).localeCompare(a.filename || a.id);
+  });
+}
+
+/**
+ * Constructs a single GalleryPhotoItem from an Expo FileSystem File object.
+ * Reads modificationTime only for this single file without re-enumerating the directory.
+ */
+export function buildPhotoItemFromFile(file: File): GalleryPhotoItem | null {
+  if (!isPhotoFile(file.name)) {
+    return null;
+  }
+  const isRaw = isRawPhoto(file.name);
+  let capturedAt: number | undefined;
+  try {
+    const modTime = file.modificationTime;
+    capturedAt = modTime
+      ? typeof modTime === 'number' && modTime < 1e10
+        ? modTime * 1000 // Expo returns seconds on Android — convert to ms
+        : (modTime as number)
+      : undefined;
+  } catch {
+    capturedAt = undefined;
+  }
+
+  const timeFormatted = capturedAt ? formatTime(capturedAt) : '--:--';
+
+  return {
+    id: `dcim-${file.name}`,
+    assetId: undefined,
+    uri: file.uri,
+    filename: file.name,
+    isRaw,
+    status: 'new',
+    selected: false,
+    timestamp: timeFormatted,
+    capturedAt,
+    dimensions: undefined,
+    aperture: undefined,
+    shutter: undefined,
+  };
+}
+
+/**
  * Scans the configured photo storage directory using Expo SDK 57 Directory API.
- *
- * PERFORMANCE NOTE: The previous implementation called Album.get() + album.getAssets()
- * + sequential await a.getFilename() for every asset, which caused 26–32 second scan
- * times for 466 photos and overwhelmed the JS bridge. This has been removed entirely.
- *
- * The file name and URI are already available directly from the expo-file-system
- * Directory.list() result (file.name, file.uri). The MediaLibrary asset ID lookup
- * (assetId field) was only used for display and is not required for the gallery's
- * core photo selection, marking, upload, or deletion workflows. Those workflows
- * use file.uri as the stable identifier.
+ * Deduplicates in-flight calls: returns shared promise if a scan is already running.
  *
  * Returns sorted photos (newest first) with no bridge-blocking sequential awaits.
  */
 export async function scanDcimEntephotoPhotos(
   silent: boolean = false,
+  force: boolean = false,
 ): Promise<GalleryPhotoItem[]> {
   if (Platform.OS !== 'android') {
     return [];
   }
 
-  const sequenceId = ++currentScanSequenceId;
-  activeScanCount++;
-  notifyScanListeners();
-
-  try {
-    // 1. Ensure canonical directory exists and storage permission is granted
-    const initialized = await ensurePhotoDirectoryExists(silent);
-    if (!initialized) {
-      const hasPermission = await checkStoragePermission();
-      if (!hasPermission) {
-        if (!silent) {
-          console.warn(
-            `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
-          );
-        }
-        throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
-      }
-      throw new Error(`Failed to access or create ${PHOTO_STORAGE_DISPLAY_PATH}`);
-    }
-
-    const dir = new Directory(CANONICAL_DCIM_DIR_URI);
-    if (!dir.exists) {
-      throw new Error(`Directory ${PHOTO_STORAGE_DISPLAY_PATH} does not exist`);
-    }
-
-    const entries = dir.list();
-    const photoEntries: File[] = [];
-
-    for (const entry of entries) {
-      if (entry instanceof File && isPhotoFile(entry.name)) {
-        photoEntries.push(entry);
-      }
-    }
-
-    const scannedPhotos: GalleryPhotoItem[] = photoEntries.map(file => {
-      const isRaw = isRawPhoto(file.name);
-      const modTime = file.modificationTime;
-
-      // Normalize modificationTime: Expo FileSystem returns seconds on Android.
-      const capturedAt: number | undefined = modTime
-        ? typeof modTime === 'number' && modTime < 1e10
-          ? modTime * 1000 // Expo returns seconds — convert to ms
-          : (modTime as number) // Already ms
-        : undefined;
-
-      // Use fast manual HH:MM formatting instead of toLocaleTimeString (avoids Intl
-      // initialization overhead on Hermes which causes blocking delays in tight loops).
-      const timeFormatted = capturedAt ? formatTime(capturedAt) : '--:--';
-
-      return {
-        // Use filename-based stable ID — avoids the expensive sequential MediaLibrary
-        // getFilename() loop that was previously adding 26–32 s per scan cycle.
-        id: `dcim-${file.name}`,
-        assetId: undefined,
-        uri: file.uri,
-        filename: file.name,
-        isRaw,
-        status: 'new',
-        selected: false,
-        timestamp: timeFormatted,
-        capturedAt,
-        dimensions: undefined,
-        aperture: undefined,
-        shutter: undefined,
-      };
-    });
-
-    if (scannedPhotos.length > 0 && !silent) {
-      console.log(
-        `[LocalPhotoService] Scanned ${scannedPhotos.length} photos (seq #${sequenceId}).`,
-      );
-    }
-
-    // Preserve the correct chronological order (newest first) with deterministic tiebreaking
-    scannedPhotos.sort((a, b) => {
-      const timeA = a.capturedAt ?? 0;
-      const timeB = b.capturedAt ?? 0;
-      if (timeA !== timeB) {
-        return timeB - timeA;
-      }
-      return (b.filename || b.id).localeCompare(a.filename || a.id);
-    });
-
-    // Tag the scanned result array with its unique sequence ID for safe concurrency
-    (scannedPhotos as any).scanSequenceId = sequenceId;
-
-    return scannedPhotos;
-  } catch (error: any) {
-    console.error(
-      `[LocalPhotoService] Failed to read directory at ${CANONICAL_DCIM_DIR_URI}:`,
-      error?.message || error,
-    );
-    throw error;
-  } finally {
-    activeScanCount = Math.max(0, activeScanCount - 1);
-    notifyScanListeners();
+  // Deduplicate concurrent scans: if a scan is already in flight and not forced, reuse the in-flight promise
+  if (inFlightScanPromise && !force) {
+    return inFlightScanPromise;
   }
+
+  inFlightScanPromise = (async () => {
+    const sequenceId = ++currentScanSequenceId;
+    if (!silent) {
+      activeScanCount++;
+      notifyScanListeners();
+    }
+
+    try {
+      // 1. Ensure canonical directory exists and storage permission is granted
+      const initialized = await ensurePhotoDirectoryExists(silent);
+      if (!initialized) {
+        const hasPermission = await checkStoragePermission();
+        if (!hasPermission) {
+          if (!silent) {
+            console.warn(
+              `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
+            );
+          }
+          throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
+        }
+        throw new Error(`Failed to access or create ${PHOTO_STORAGE_DISPLAY_PATH}`);
+      }
+
+      const dir = new Directory(CANONICAL_DCIM_DIR_URI);
+      if (!dir.exists) {
+        throw new Error(`Directory ${PHOTO_STORAGE_DISPLAY_PATH} does not exist`);
+      }
+
+      const entries = dir.list();
+      const photoEntries: File[] = [];
+
+      for (const entry of entries) {
+        if (entry instanceof File && isPhotoFile(entry.name)) {
+          photoEntries.push(entry);
+        }
+      }
+
+      const scannedPhotos: GalleryPhotoItem[] = [];
+      for (const file of photoEntries) {
+        const item = buildPhotoItemFromFile(file);
+        if (item) {
+          scannedPhotos.push(item);
+        }
+      }
+
+      if (scannedPhotos.length > 0 && !silent) {
+        console.log(
+          `[LocalPhotoService] Full scan completed: ${scannedPhotos.length} photos (seq #${sequenceId}).`,
+        );
+      }
+
+      // Preserve chronological order (newest first) with deterministic tiebreaking
+      sortPhotosChronological(scannedPhotos);
+      (scannedPhotos as any).scanSequenceId = sequenceId;
+
+      // Synchronize in-memory authoritative cache
+      cachedPhotosMap.clear();
+      for (const p of scannedPhotos) {
+        cachedPhotosMap.set(p.id, p);
+        if (p.uri) {
+          cachedPhotosMap.set(p.uri, p);
+        }
+      }
+
+      return scannedPhotos;
+    } catch (error: any) {
+      console.error(
+        `[LocalPhotoService] Failed to read directory at ${CANONICAL_DCIM_DIR_URI}:`,
+        error?.message || error,
+      );
+      throw error;
+    } finally {
+      if (!silent) {
+        activeScanCount = Math.max(0, activeScanCount - 1);
+        notifyScanListeners();
+      }
+      inFlightScanPromise = null;
+    }
+  })();
+
+  return inFlightScanPromise;
 }
 
+export type PhotoSubscriptionOptions = {
+  onError?: (error: any) => void;
+};
+
 /**
- * Subscribes to real-time additions/modifications in the DCIM folder.
+ * Subscribes to real-time DCIM folder changes.
  *
- * POLLING & EVENT DESIGN:
- * - Uses non-overlapping scan scheduling with a recursive setTimeout loop.
- * - Flags pending scans when triggers arrive while an active scan is running.
- * - Debounces rapid native watcher and onPhotoSaved events (150ms) to avoid jitter.
- * - Guards against older async scan responses overwriting newer photo data via sequence IDs.
+ * EVENT-DRIVEN DESIGN:
+ * - Performs one complete initial scan upon entering the Gallery.
+ * - Watches directory changes via Directory.watch() and native camera onPhotoSaved events.
+ * - Safely buffers incoming events during the initial scan so no camera imports are lost.
+ * - Incrementally adds, updates, or deletes single photo items without re-enumerating the folder.
+ * - Coalesces rapid event bursts with a short 50ms debounce.
+ * - Falls back to a debounced single scan only if a watcher event is coarse (directory-level).
+ * - Zero recurring 2-second polling!
  */
 export function subscribeToDcimPhotos(
   onPhotosUpdated: (photos: GalleryPhotoItem[]) => void,
-  pollIntervalMs: number = 10000,
+  options?: PhotoSubscriptionOptions | number,
 ): () => void {
   let isSubscribed = true;
-  let isScanning = false;
-  let hasPendingScan = false;
-  let watcherSubscription: { remove: () => void } | null = null;
+  let isInitialScanInFlight = true;
+  const pendingInitialScanEvents: (() => void)[] = [];
+  let watcherSubscription: WatchSubscription | null = null;
   let photoSavedSub: { remove: () => void } | null = null;
-  let nextPollTimer: ReturnType<typeof setTimeout> | null = null;
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastSignature = '';
-  let latestAppliedSequence = 0;
+  let emitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let coarseScanDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const scheduleNextPoll = () => {
+  const callbacks = typeof options === 'object' && options !== null ? options : undefined;
+
+  const emitUpdatedPhotos = () => {
     if (!isSubscribed) return;
-    nextPollTimer = setTimeout(() => {
-      runScan(true);
-    }, pollIntervalMs);
+    const unique = new Set<GalleryPhotoItem>();
+    for (const item of cachedPhotosMap.values()) {
+      unique.add(item);
+    }
+    const sorted = Array.from(unique);
+    sortPhotosChronological(sorted);
+    const seq = ++currentScanSequenceId;
+    (sorted as any).scanSequenceId = seq;
+    console.log(
+      `[LocalPhotoService] Emitting ${sorted.length} updated photos (seq #${seq}) to subscriber`,
+    );
+    onPhotosUpdated(sorted);
   };
 
-  const runScan = async (silent: boolean) => {
+  const scheduleEmit = () => {
     if (!isSubscribed) return;
-    if (isScanning) {
-      hasPendingScan = true;
-      return;
+    if (emitDebounceTimer !== null) {
+      clearTimeout(emitDebounceTimer);
     }
-    isScanning = true;
-    try {
-      const photos = await scanDcimEntephotoPhotos(silent);
-      if (!isSubscribed) return;
+    emitDebounceTimer = setTimeout(() => {
+      emitDebounceTimer = null;
+      emitUpdatedPhotos();
+    }, 50);
+  };
 
-      const seq = getPhotoScanSequenceId(photos);
-      if (seq >= latestAppliedSequence) {
-        latestAppliedSequence = seq;
-        // Only notify the subscriber when the set of photo URIs has actually changed.
-        const signature = photos.map(p => p.uri).join('|');
-        if (signature !== lastSignature) {
-          lastSignature = signature;
-          console.log(
-            `[LocalPhotoService] Emitting ${photos.length} updated photos (seq #${seq}) to gallery`,
-          );
+  const scheduleCoarseScan = () => {
+    if (!isSubscribed) return;
+    if (coarseScanDebounceTimer !== null) {
+      clearTimeout(coarseScanDebounceTimer);
+    }
+    coarseScanDebounceTimer = setTimeout(async () => {
+      coarseScanDebounceTimer = null;
+      try {
+        console.log(
+          '[LocalPhotoService] Coarse directory event detected — executing single fallback rescan',
+        );
+        const photos = await scanDcimEntephotoPhotos(true, true);
+        if (isSubscribed) {
           onPhotosUpdated(photos);
         }
-      } else {
-        console.log(
-          `[LocalPhotoService] Dropping stale scan result (seq #${seq} < latest #${latestAppliedSequence})`,
-        );
+      } catch (err) {
+        console.error('[LocalPhotoService] Coarse rescan failed:', err);
       }
-    } catch (error) {
-      console.error('[LocalPhotoService] Error during scan:', error);
-    } finally {
-      isScanning = false;
-      if (isSubscribed) {
-        if (hasPendingScan) {
-          hasPendingScan = false;
-          Promise.resolve().then(() => runScan(true));
-        } else {
-          scheduleNextPoll();
-        }
-      }
-    }
-  };
-
-  const triggerDebouncedScan = () => {
-    if (!isSubscribed) return;
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-    }
-    debounceTimer = setTimeout(() => {
-      debounceTimer = null;
-      if (nextPollTimer !== null) {
-        clearTimeout(nextPollTimer);
-        nextPollTimer = null;
-      }
-      runScan(true);
     }, 150);
   };
 
-  // 1. Initial scan on subscription start (shows permission dialog if needed).
-  requestStoragePermission()
-    .then(granted => {
-      if (granted && isSubscribed) {
-        runScan(false);
-      }
-    })
-    .catch(err => {
-      console.error('[LocalPhotoService] Permission request failed:', err);
-    });
+  const handleFileUpsert = (file: File) => {
+    const apply = () => {
+      try {
+        if (!file.exists) return;
+        const photoItem = buildPhotoItemFromFile(file);
+        if (!photoItem) return;
 
-  // 2. Set up native directory watcher on the canonical folder for instant notification of new camera photos.
+        const existing = cachedPhotosMap.get(photoItem.id) || cachedPhotosMap.get(photoItem.uri);
+        if (
+          existing &&
+          existing.capturedAt === photoItem.capturedAt &&
+          existing.uri === photoItem.uri &&
+          existing.filename === photoItem.filename
+        ) {
+          return;
+        }
+
+        cachedPhotosMap.set(photoItem.id, photoItem);
+        cachedPhotosMap.set(photoItem.uri, photoItem);
+        scheduleEmit();
+      } catch (e) {
+        console.warn(`[LocalPhotoService] Failed to process file event for ${file.name}:`, e);
+      }
+    };
+
+    if (isInitialScanInFlight) {
+      pendingInitialScanEvents.push(apply);
+    } else {
+      apply();
+    }
+  };
+
+  const handleFileDelete = (filename: string, uri: string) => {
+    const apply = () => {
+      const id = `dcim-${filename}`;
+      let changed = false;
+      if (cachedPhotosMap.has(id)) {
+        cachedPhotosMap.delete(id);
+        changed = true;
+      }
+      if (cachedPhotosMap.has(uri)) {
+        cachedPhotosMap.delete(uri);
+        changed = true;
+      }
+      if (changed) {
+        scheduleEmit();
+      }
+    };
+
+    if (isInitialScanInFlight) {
+      pendingInitialScanEvents.push(apply);
+    } else {
+      apply();
+    }
+  };
+
+  // 1. Register native directory watcher safely before initial scan
   if (Platform.OS === 'android') {
     try {
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
       if (dir.exists) {
-        watcherSubscription = dir.watch(() => {
-          if (isSubscribed) {
-            console.log(
-              '[LocalPhotoService] Directory change detected, triggering debounced scan.',
-            );
-            triggerDebouncedScan();
-          }
-        });
+        watcherSubscription = dir.watch(
+          (event: WatchEvent<File | Directory>) => {
+            if (!isSubscribed) return;
+            const target = event.target;
+            const isDirectory = target instanceof Directory || (target as any).isDirectory;
+            const isSelfDir = isDirectory || target.uri === CANONICAL_DCIM_DIR_URI || !target.name;
+
+            if (isSelfDir) {
+              scheduleCoarseScan();
+              return;
+            }
+
+            const filename = target.name || (target.uri ? target.uri.split('/').pop() : '');
+            if (!filename || !isPhotoFile(filename)) {
+              return;
+            }
+
+            const targetUri = ((target as any)?.uri as string) || '';
+            const targetFile = target instanceof File ? target : new File(targetUri);
+
+            switch (event.type) {
+              case 'created':
+              case 'modified':
+                handleFileUpsert(targetFile);
+                break;
+              case 'deleted':
+                handleFileDelete(filename, targetUri);
+                break;
+              case 'renamed': {
+                handleFileDelete(filename, targetUri);
+                if (event.newTarget) {
+                  const newTargetUri = ((event.newTarget as any)?.uri as string) || '';
+                  const newFilename =
+                    event.newTarget.name || (newTargetUri ? newTargetUri.split('/').pop() : '');
+                  if (newFilename && isPhotoFile(newFilename)) {
+                    const newFile =
+                      event.newTarget instanceof File ? event.newTarget : new File(newTargetUri);
+                    handleFileUpsert(newFile);
+                  }
+                }
+                break;
+              }
+            }
+          },
+          { debounce: 80 },
+        );
       }
     } catch (err) {
-      console.warn(
-        '[LocalPhotoService] Directory.watch() not supported, using interval polling only:',
-        err,
-      );
+      console.warn('[LocalPhotoService] Directory.watch() setup warning:', err);
     }
 
-    // 3. Hook into native onPhotoSaved event for instant gallery updates
+    // 2. Register native camera photo saved listener safely before initial scan
     try {
       photoSavedSub = addPhotoSavedListener(event => {
-        console.log(
-          '[LocalPhotoService] onPhotoSaved event received:',
-          event.filename,
-          '— triggering debounced scan',
-        );
-        if (isSubscribed) {
-          triggerDebouncedScan();
-        }
+        if (!isSubscribed) return;
+        console.log(`[LocalPhotoService] Camera photo saved event: ${event.filename}`);
+        if (!isPhotoFile(event.filename)) return;
+
+        const targetFile = new File(event.uri);
+        handleFileUpsert(targetFile);
       });
     } catch (err) {
       console.warn('[LocalPhotoService] Failed to bind addPhotoSavedListener:', err);
     }
   }
 
+  // 3. Start initial complete scan (shows permission dialog if needed)
+  requestStoragePermission()
+    .then(granted => {
+      if (!isSubscribed) return;
+      if (!granted) {
+        isInitialScanInFlight = false;
+        callbacks?.onError?.(
+          new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`),
+        );
+        return;
+      }
+
+      return scanDcimEntephotoPhotos(false);
+    })
+    .then(scanned => {
+      if (!isSubscribed || !scanned) return;
+      isInitialScanInFlight = false;
+
+      // Drain and apply any events that arrived while initial scan was executing
+      while (pendingInitialScanEvents.length > 0) {
+        const queuedAction = pendingInitialScanEvents.shift();
+        try {
+          queuedAction?.();
+        } catch (e) {
+          console.warn('[LocalPhotoService] Error applying queued initial scan event:', e);
+        }
+      }
+
+      emitUpdatedPhotos();
+    })
+    .catch(err => {
+      if (!isSubscribed) return;
+      isInitialScanInFlight = false;
+      console.error('[LocalPhotoService] Initial subscription scan error:', err);
+      callbacks?.onError?.(err);
+    });
+
   return () => {
     isSubscribed = false;
-    hasPendingScan = false;
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-      debounceTimer = null;
+    isInitialScanInFlight = false;
+    pendingInitialScanEvents.length = 0;
+    if (emitDebounceTimer !== null) {
+      clearTimeout(emitDebounceTimer);
+      emitDebounceTimer = null;
     }
-    if (nextPollTimer !== null) {
-      clearTimeout(nextPollTimer);
-      nextPollTimer = null;
+    if (coarseScanDebounceTimer !== null) {
+      clearTimeout(coarseScanDebounceTimer);
+      coarseScanDebounceTimer = null;
     }
     if (watcherSubscription) {
       try {
         watcherSubscription.remove();
       } catch {}
+      watcherSubscription = null;
     }
     if (photoSavedSub) {
       try {
         photoSavedSub.remove();
       } catch {}
+      photoSavedSub = null;
     }
   };
 }
@@ -553,6 +697,10 @@ export async function deleteLocalPhoto(fileUri: string): Promise<boolean> {
     if (file.exists) {
       file.delete();
       console.log(`[LocalPhotoService] Successfully deleted file: ${fileUri}`);
+      const filename = file.name || fileUri.split('/').pop() || '';
+      const photoId = `dcim-${filename}`;
+      cachedPhotosMap.delete(photoId);
+      cachedPhotosMap.delete(fileUri);
       return true;
     }
     console.warn(`[LocalPhotoService] File not found for deletion: ${fileUri}`);
