@@ -274,6 +274,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [uploadedPhotoIds, setUploadedPhotoIds] = useState<Set<string>>(new Set());
   const uploadedPhotoIdsRef = React.useRef<Set<string>>(new Set());
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
+  const selectedPhotoIdsRef = React.useRef(selectedPhotoIds);
+  // eslint-disable-next-line react-hooks/refs
+  selectedPhotoIdsRef.current = selectedPhotoIds;
   const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
   const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
 
@@ -1552,6 +1555,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   // ── Render: Single Grid Tile (shared for single, batch_photo row types) ──
   // Replaced inline renderPhotoTile with MemoizedPhotoTile
 
+  // ── Stable Viewer Navigation Callback ────────────────────────────────────
+  const handleOpenViewer = useCallback((flatIndex: number) => {
+    setViewerInitialIndex(flatIndex);
+    setViewerVisible(true);
+  }, []);
+
   // ── Render: Batch Section Header (SectionList) ───────────────────────────
   const renderSectionHeader = useCallback(
     ({ section }: { section: GalleryBatchSection }) => {
@@ -1559,13 +1568,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <MemoizedBatchHeader
           section={section}
           isDark={isDark}
-          selectedPhotoIds={selectedPhotoIds}
+          selectedPhotoIds={selectedPhotoIdsRef.current}
           uploadedPhotoIds={uploadedPhotoIds}
           onToggleBatchSelection={toggleBatchSelection}
         />
       );
     },
-    [isDark, selectedPhotoIds, uploadedPhotoIds, toggleBatchSelection],
+    [isDark, uploadedPhotoIds, toggleBatchSelection],
   );
 
   // ── Render: Section Item (3-Column Grid Row for all batch photos) ──────────
@@ -1577,18 +1586,15 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         <MemoizedGridRow
           item={item}
           uploadingPhotoIds={uploadingPhotoIds}
-          selectedPhotoIds={selectedPhotoIds}
+          selectedPhotoIds={selectedPhotoIdsRef.current}
           favoritePhotoIds={favoritePhotoIds}
           uploadedPhotoIds={uploadedPhotoIds}
-          onOpenViewer={flatIndex => {
-            setViewerInitialIndex(flatIndex);
-            setViewerVisible(true);
-          }}
+          onOpenViewer={handleOpenViewer}
           onToggleSelection={togglePhotoSelection}
         />
       );
     },
-    [uploadingPhotoIds, selectedPhotoIds, favoritePhotoIds, uploadedPhotoIds, togglePhotoSelection],
+    [uploadingPhotoIds, favoritePhotoIds, uploadedPhotoIds, handleOpenViewer, togglePhotoSelection],
   );
 
   return (
