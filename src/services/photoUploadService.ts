@@ -193,6 +193,12 @@ export async function uploadSinglePhoto(
     // otherwise iteratively reduces quality, always outputting JPEG.
     const compressionResult = await compressToTargetSize(sourceUri, TARGET_UPLOAD_BYTES);
 
+    // Immediately track the generated temporary file so it is cleaned up even if
+    // cancellation occurs, validation fails, or file renaming throws.
+    if (!compressionResult.skipped && compressionResult.uri) {
+      tempUrisToCleanup.push(compressionResult.uri);
+    }
+
     // Cancellation check after compression finishes
     if (cancelControl?.isCancelled) {
       throw new UploadCancelledError('Upload was cancelled during compression.');
@@ -382,7 +388,15 @@ export async function uploadSinglePhoto(
 
     // 10. Clean up all temp files (compressed output + renamed copy) after upload finishes or cancels.
     for (const tempUri of tempUrisToCleanup) {
-      await cleanupTempFile(tempUri);
+      try {
+        await cleanupTempFile(tempUri);
+      } catch (cleanupErr) {
+        console.warn(
+          '[photoUploadService] Unexpected error during temp file cleanup:',
+          tempUri,
+          cleanupErr,
+        );
+      }
     }
   }
 }
