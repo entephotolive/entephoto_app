@@ -27,6 +27,7 @@ import {
   Info,
   AlertTriangle,
   X,
+  Square,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { AppNavigationProp, AppStackParamList } from '@/navigation/types';
@@ -45,7 +46,8 @@ import {
   getPhotoScanSequenceId,
 } from '@/services/localPhotoService';
 import {
-  uploadSinglePhoto,
+  uploadPreparedPhoto,
+  UploadLookaheadPipeline,
   isValidObjectId,
   UploadCancellationControl,
   isUploadCancelledError,
@@ -487,8 +489,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [isAllUploadPaused, setIsAllUploadPaused] = useState(false);
   const isAllUploadWorkerRunningRef = React.useRef(false);
   const currentUploadControlRef = React.useRef<UploadCancellationControl | null>(null);
+  const currentPipelineRef = React.useRef<UploadLookaheadPipeline | null>(null);
   const currentUploadingPhotoIdRef = React.useRef<string | null>(null);
   const processAllUploadQueueRef = React.useRef<() => void>(() => {});
+
+  // Selected-photo batch upload: stop-after-current state & pipeline ref
+  const isBatchStopRequestedRef = React.useRef(false);
+  const [isBatchStopRequested, setIsBatchStopRequested] = useState(false);
+  const currentBatchPipelineRef = React.useRef<UploadLookaheadPipeline | null>(null);
 
   // Dedicated cleanup effect for All Upload session on unmount
   useEffect(() => {
@@ -499,6 +507,15 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       if (currentUploadControlRef.current) {
         currentUploadControlRef.current.cancel();
         currentUploadControlRef.current = null;
+      }
+      if (currentPipelineRef.current) {
+        currentPipelineRef.current.cleanup();
+        currentPipelineRef.current = null;
+      }
+      isBatchStopRequestedRef.current = false;
+      if (currentBatchPipelineRef.current) {
+        currentBatchPipelineRef.current.cleanup();
+        currentBatchPipelineRef.current = null;
       }
       allUploadQueueRef.current = [];
       allUploadSessionProcessedRef.current = 0;
@@ -1064,6 +1081,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
 
     isAllUploadWorkerRunningRef.current = true;
+    const pipeline = new UploadLookaheadPipeline();
+    currentPipelineRef.current = pipeline;
 
     try {
       while (isAllUploadActiveRef.current && !isAllUploadPausedRef.current) {
@@ -1110,10 +1129,34 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         setIsUploading(true);
 
         try {
+          // 1. Await preparation for the active photo (uses background lookahead if available)
+          const prepared = await pipeline.getPrepared(photo, cancelControl);
+
+          // 2. Look ahead: find next eligible photo in queue and prepare it in the background
+          if (
+            isAllUploadActiveRef.current &&
+            !isAllUploadPausedRef.current &&
+            !cancelControl.isCancelled
+          ) {
+            for (let q = 0; q < allUploadQueueRef.current.length; q++) {
+              const peekId = allUploadQueueRef.current[q];
+              const peekPhoto = photosRef.current.find(p => p.id === peekId);
+              if (
+                peekPhoto &&
+                peekPhoto.status !== 'uploaded' &&
+                !allUploadFailedIdsRef.current.has(peekId)
+              ) {
+                pipeline.prepareNext(peekPhoto);
+                break;
+              }
+            }
+          }
+
+          // 3. Network upload — strictly 1 active network transfer at any time
           let lastStateUpdate = 0;
-          await uploadSinglePhoto(
+          await uploadPreparedPhoto(
             eventId,
-            photo,
+            prepared,
             null,
             percentage => {
               Animated.timing(progressAnim, {
@@ -1169,6 +1212,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         }
       }
     } finally {
+      await pipeline.cleanup();
+      currentPipelineRef.current = null;
       isAllUploadWorkerRunningRef.current = false;
       if (
         !isAllUploadActiveRef.current ||
@@ -1250,6 +1295,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     if (currentUploadControlRef.current) {
       currentUploadControlRef.current.cancel();
     }
+    if (currentPipelineRef.current) {
+      currentPipelineRef.current.cancel();
+    }
 
     // Re-queue the active photo ID to the front of the queue if not already there
     if (currentUploadingPhotoIdRef.current) {
@@ -1287,6 +1335,24 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     // Resume processing existing queue (the previously paused photo is at the front)
     processAllUploadQueue();
   }, [processAllUploadQueue]);
+
+  // Stop after current photo handler for selected-photo batch upload
+  const handleStopBatchAfterCurrent = useCallback(() => {
+    if (isBatchStopRequestedRef.current || !isUploadingRef.current) {
+      return;
+    }
+    console.log('[PhotoGallery] Stop after current photo requested by user.');
+    isBatchStopRequestedRef.current = true;
+    setIsBatchStopRequested(true);
+
+    // Cancel and clean up background lookahead immediately so no unneeded work continues
+    if (currentBatchPipelineRef.current) {
+      currentBatchPipelineRef.current.cancel();
+      currentBatchPipelineRef.current.cleanup().catch(err => {
+        console.warn('[PhotoGallery] Error cleaning up lookahead on batch stop:', err);
+      });
+    }
+  }, []);
 
   // ── CORE UPLOAD BATCH HANDLER ──
   // This single function owns the upload process to strictly prevent concurrent upload bugs.
@@ -1333,8 +1399,21 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         console.log(`[PhotoGallery] Starting batch upload of ${total} photos.`);
         setUploadProgress({ current: 0, total });
 
+        const pipeline = new UploadLookaheadPipeline();
+        currentBatchPipelineRef.current = pipeline;
+        isBatchStopRequestedRef.current = false;
+        setIsBatchStopRequested(false);
+
         try {
           for (let i = 0; i < total; i++) {
+            // Guard before starting a new photo if stop was requested
+            if (isBatchStopRequestedRef.current) {
+              console.log(
+                `[PhotoGallery] Batch stopped before photo ${i + 1}/${total} as requested.`,
+              );
+              break;
+            }
+
             const photo = batchToUpload[i];
             console.log(`[PhotoGallery] Uploading photo ${i + 1}/${total}: ${photo.filename}`);
 
@@ -1350,8 +1429,21 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
 
             try {
+              // 1. Prepare active photo (reuses lookahead prepared in previous iteration)
+              const prepared = await pipeline.getPrepared(photo);
+
+              // 2. Pre-compress the next photo in the background only if stop has not been requested
+              if (
+                !isBatchStopRequestedRef.current &&
+                i + 1 < total &&
+                batchToUpload[i + 1].status !== 'uploaded'
+              ) {
+                pipeline.prepareNext(batchToUpload[i + 1]);
+              }
+
+              // 3. Network upload — strictly 1 active network transfer at any time
               let lastStateUpdate = 0;
-              await uploadSinglePhoto(eventId, photo, null, percentage => {
+              await uploadPreparedPhoto(eventId, prepared, null, percentage => {
                 // Smoothly animate the bar
                 Animated.timing(progressAnim, {
                   toValue: percentage,
@@ -1390,17 +1482,33 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 return next;
               });
             }
+
+            // Guard immediately after the current photo settles
+            if (isBatchStopRequestedRef.current) {
+              console.log(`[PhotoGallery] Batch stopped after photo ${i + 1}/${total} settled.`);
+              break;
+            }
           }
         } finally {
+          const wasStopped = isBatchStopRequestedRef.current;
+          await pipeline.cleanup();
+          currentBatchPipelineRef.current = null;
           // ALWAYS release the lock
           isUploadingRef.current = false;
           setIsUploading(false);
           setUploadProgress(null);
+          isBatchStopRequestedRef.current = false;
+          setIsBatchStopRequested(false);
           console.log(
-            `[PhotoGallery] Batch complete. Success: ${successCount}, Failed: ${failCount}`,
+            `[PhotoGallery] Batch complete. Success: ${successCount}, Failed: ${failCount}, Stopped: ${wasStopped}`,
           );
 
-          if (failCount === 0) {
+          if (wasStopped && successCount + failCount < total) {
+            Alert.alert(
+              'Upload Stopped',
+              `Batch stopped after current photo settled.\n\nUploaded: ${successCount}\nRemaining: ${total - successCount - failCount}${failCount > 0 ? `\nFailed: ${failCount}` : ''}`,
+            );
+          } else if (failCount === 0) {
             Alert.alert(
               'Upload Complete! 🚀',
               `Successfully uploaded ${successCount} photo${successCount !== 1 ? 's' : ''} to "${eventTitle}".`,
@@ -2257,12 +2365,54 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                     <Text
                       style={[styles.dockProgressTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
                     >
-                      Uploading photos
+                      {isBatchStopRequested ? 'Stopping after photo...' : 'Uploading photos'}
                     </Text>
                   </View>
-                  <Text style={[styles.dockProgressTitle, { color: '#6366F1' }]}>
-                    {uploadProgress?.current || 1} / {uploadProgress?.total || 0} photos
-                  </Text>
+                  <View style={styles.dockUploadRightRow}>
+                    <Text style={[styles.dockProgressTitle, { color: '#6366F1' }]}>
+                      {uploadProgress?.current || 1} / {uploadProgress?.total || 0}
+                    </Text>
+                    <TouchableOpacity
+                      activeOpacity={0.75}
+                      onPress={handleStopBatchAfterCurrent}
+                      disabled={isBatchStopRequested}
+                      style={[
+                        styles.dockStopButton,
+                        {
+                          backgroundColor: isBatchStopRequested
+                            ? isDark
+                              ? '#2E2225'
+                              : '#FEE2E2'
+                            : isDark
+                              ? '#2A1B1F'
+                              : '#FFF1F2',
+                          borderColor: isBatchStopRequested
+                            ? isDark
+                              ? '#4A2A2E'
+                              : '#FCA5A5'
+                            : isDark
+                              ? '#5B252E'
+                              : '#FECDD3',
+                        },
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Stop after current"
+                    >
+                      <Square
+                        size={10}
+                        color={isBatchStopRequested ? '#9CA3AF' : '#E11D48'}
+                        fill={isBatchStopRequested ? '#9CA3AF' : '#E11D48'}
+                      />
+                      <Text
+                        style={[
+                          styles.dockStopButtonText,
+                          { color: isBatchStopRequested ? '#9CA3AF' : '#E11D48' },
+                        ]}
+                      >
+                        {isBatchStopRequested ? 'Stopping...' : 'Stop after current'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 {/* Bottom Row */}
@@ -3496,6 +3646,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  dockUploadRightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dockStopButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 4,
+  },
+  dockStopButtonText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 11,
+    fontWeight: '700',
   },
   dockAllUploadRightRow: {
     flexDirection: 'row',

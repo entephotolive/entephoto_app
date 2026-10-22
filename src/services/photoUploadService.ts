@@ -135,32 +135,37 @@ function getMimeTypeFromFilename(filename?: string): string {
 }
 
 /**
- * Uploads a single photo to POST /api/upload-images/ with lossy pre-compression to ~2MB.
- * Supports optional UploadCancellationControl to allow immediate abort of compression and network upload.
+ * Encapsulates a photo that has been validated, compressed (if necessary),
+ * and moved to its final staging filename, ready for network transfer.
  */
-export async function uploadSinglePhoto(
-  eventId: string,
+export interface PreparedPhoto {
+  photo: GalleryPhotoItem;
+  filename: string;
+  finalUploadUri: string;
+  finalSizeBytes: number;
+  finalMime: string;
+  tempUrisToCleanup: string[];
+  /** Idempotent cleanup method to remove temporary files */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Prepares a single photo for upload (validation, compression, renaming).
+ * Safe to run in the background as lookahead while another photo uploads over the network.
+ */
+export async function preparePhotoForUpload(
   photo: GalleryPhotoItem,
-  folderId?: string | null,
-  onProgress?: (progress: number) => void,
   cancelControl?: UploadCancellationControl,
-): Promise<UploadPhotoResponse> {
+): Promise<PreparedPhoto> {
   // Early cancellation check before starting work
   if (cancelControl?.isCancelled) {
-    throw new UploadCancelledError('Upload was cancelled before starting.');
-  }
-
-  // 1. Validate eventId (24-char hex)
-  if (!isValidObjectId(eventId)) {
-    const msg = `[photoUploadService] Invalid eventId: "${eventId}". Must be a 24-character hex MongoDB ObjectId.`;
-    console.error(msg);
-    throw new Error(msg);
+    throw new UploadCancelledError('Upload was cancelled before starting preparation.');
   }
 
   const filename =
     photo.filename && photo.filename.trim() ? photo.filename.trim() : `photo_${Date.now()}.jpg`;
 
-  // 2. Client-side pre-checks: MIME type / file format
+  // 1. Client-side pre-checks: MIME type / file format
   const mimeType = getMimeTypeFromFilename(filename);
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     if (mimeType === 'image/heic') {
@@ -178,7 +183,7 @@ export async function uploadSinglePhoto(
     );
   }
 
-  // 3. Source URI — always the original on-disk file; never a pre-compressed copy
+  // 2. Source URI — always the original on-disk file; never a pre-compressed copy
   const sourceUri =
     photo.uri.startsWith('content://') || photo.uri.startsWith('file://')
       ? photo.uri
@@ -187,8 +192,25 @@ export async function uploadSinglePhoto(
   /** Temp files created during compression / rename that must be cleaned up after upload. */
   const tempUrisToCleanup: string[] = [];
 
+  let isCleanedUp = false;
+  const cleanup = async () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    for (const tempUri of tempUrisToCleanup) {
+      try {
+        await cleanupTempFile(tempUri);
+      } catch (cleanupErr) {
+        console.warn(
+          '[photoUploadService] Unexpected error during temp file cleanup:',
+          tempUri,
+          cleanupErr,
+        );
+      }
+    }
+  };
+
   try {
-    // 4. Compress at upload time (target: 2–3 MB).
+    // 3. Compress at upload time (target: 2–3 MB).
     // compressToTargetSize skips encoding for JPEG files already ≤ 4 MB;
     // otherwise iteratively reduces quality, always outputting JPEG.
     const compressionResult = await compressToTargetSize(sourceUri, TARGET_UPLOAD_BYTES);
@@ -233,7 +255,7 @@ export async function uploadSinglePhoto(
       const renamedUri = `${FileSystem.cacheDirectory}${filename}`;
       await FileSystem.moveAsync({ from: finalUploadUri, to: renamedUri });
       finalUploadUri = renamedUri;
-      tempUrisToCleanup.push(renamedUri); // cleaned up in finally
+      tempUrisToCleanup.push(renamedUri); // cleaned up in finally/cleanup
     } else {
       console.log(
         `[photoUploadService] Skipped compression (≤4 MB JPEG): ${filename} (${finalSizeMb} MB)`,
@@ -245,7 +267,7 @@ export async function uploadSinglePhoto(
       throw new UploadCancelledError('Upload was cancelled before network request.');
     }
 
-    // 5. Client-side size guard (25 MB Django default).
+    // 4. Client-side size guard (25 MB Django default).
     if (finalSizeBytes > MAX_UPLOAD_BYTES) {
       const sizeMb = (finalSizeBytes / (1024 * 1024)).toFixed(1);
       throw new Error(
@@ -253,6 +275,47 @@ export async function uploadSinglePhoto(
       );
     }
 
+    return {
+      photo,
+      filename,
+      finalUploadUri,
+      finalSizeBytes,
+      finalMime,
+      tempUrisToCleanup,
+      cleanup,
+    };
+  } catch (err) {
+    // If preparation fails or is cancelled, clean up any temp files created immediately
+    await cleanup();
+    throw err;
+  }
+}
+
+/**
+ * Uploads an already-prepared photo over the network.
+ * Enforces strictly 1 active network transfer per call and guarantees cleanup in finally.
+ */
+export async function uploadPreparedPhoto(
+  eventId: string,
+  prepared: PreparedPhoto,
+  folderId?: string | null,
+  onProgress?: (progress: number) => void,
+  cancelControl?: UploadCancellationControl,
+): Promise<UploadPhotoResponse> {
+  try {
+    // Early cancellation check before starting network transfer
+    if (cancelControl?.isCancelled) {
+      throw new UploadCancelledError('Upload was cancelled before starting network transfer.');
+    }
+
+    // Validate eventId (24-char hex)
+    if (!isValidObjectId(eventId)) {
+      const msg = `[photoUploadService] Invalid eventId: "${eventId}". Must be a 24-character hex MongoDB ObjectId.`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+
+    const { filename, finalUploadUri, finalSizeBytes, finalMime } = prepared;
     const uploadUrl = `${ENV.API_BASE_URL}${API_ENDPOINTS.PHOTOS.UPLOAD}`;
 
     // Additional multipart form fields (event_id, optional folder_id)
@@ -268,7 +331,7 @@ export async function uploadSinglePhoto(
       ...(additionalParams.folder_id ? { folder_id: additionalParams.folder_id } : {}),
     });
 
-    // 6. Upload via FileSystem.createUploadTask to support byte-level progress and cancellation
+    // Upload via FileSystem.createUploadTask to support byte-level progress and cancellation
     let uploadResult: FileSystem.FileSystemUploadResult;
     try {
       const uploadTask = FileSystem.createUploadTask(
@@ -321,7 +384,7 @@ export async function uploadSinglePhoto(
 
     console.log(`[photoUploadService] HTTP ${uploadResult.status} received for "${filename}"`);
 
-    // 7. Parse response body.
+    // Parse response body.
     const responseText = uploadResult.body ?? '';
     let responseData: UploadPhotoResponse;
     try {
@@ -332,7 +395,7 @@ export async function uploadSinglePhoto(
       );
     }
 
-    // 8. Handle HTTP error status codes.
+    // Handle HTTP error status codes.
     const httpOk = uploadResult.status >= 200 && uploadResult.status < 300;
     if (!httpOk) {
       console.error(
@@ -364,7 +427,7 @@ export async function uploadSinglePhoto(
       );
     }
 
-    // 9. Backend returned 2xx — verify the photo was actually stored.
+    // Backend returned 2xx — verify the photo was actually stored.
     if ((responseData.images_uploaded ?? 0) < 1) {
       const reasons = responseData.reason_why_not_uploaded;
       if (Array.isArray(reasons) && reasons.length > 0) {
@@ -386,16 +449,131 @@ export async function uploadSinglePhoto(
     // Disconnect task from control
     cancelControl?.setUploadTask(null);
 
-    // 10. Clean up all temp files (compressed output + renamed copy) after upload finishes or cancels.
-    for (const tempUri of tempUrisToCleanup) {
+    // Clean up all temp files (compressed output + renamed copy) after upload finishes or cancels.
+    await prepared.cleanup();
+  }
+}
+
+/**
+ * Uploads a single photo to POST /api/upload-images/ with lossy pre-compression to ~2MB.
+ * Supports optional UploadCancellationControl to allow immediate abort of compression and network upload.
+ * Retains 100% backward compatibility for single-photo callers.
+ */
+export async function uploadSinglePhoto(
+  eventId: string,
+  photo: GalleryPhotoItem,
+  folderId?: string | null,
+  onProgress?: (progress: number) => void,
+  cancelControl?: UploadCancellationControl,
+): Promise<UploadPhotoResponse> {
+  const prepared = await preparePhotoForUpload(photo, cancelControl);
+  return await uploadPreparedPhoto(eventId, prepared, folderId, onProgress, cancelControl);
+}
+
+/**
+ * Coordinates safe one-photo lookahead for batch and queue uploads.
+ * Guarantees that at most one next photo is prepared concurrently in the background
+ * while the active photo uploads over the network.
+ */
+export class UploadLookaheadPipeline {
+  private preparedItem: {
+    photoId: string;
+    promise: Promise<PreparedPhoto>;
+    cancelControl: UploadCancellationControl;
+  } | null = null;
+  private isPipelineCancelled = false;
+
+  /**
+   * Starts preparing the next photo in the background if the lookahead slot is empty
+   * and the pipeline has not been cancelled.
+   */
+  prepareNext(photo: GalleryPhotoItem | undefined): void {
+    if (!photo || this.isPipelineCancelled) {
+      return;
+    }
+    // Only prepare if lookahead slot is currently vacant
+    if (this.preparedItem) {
+      return;
+    }
+
+    const prepCancelControl = new UploadCancellationControl();
+    const prepPromise = preparePhotoForUpload(photo, prepCancelControl);
+    // Attach an immediate rejection handler so compression failure while another photo is
+    // uploading does not create an unhandled promise rejection.
+    prepPromise.catch(() => {});
+
+    this.preparedItem = {
+      photoId: photo.id,
+      promise: prepPromise,
+      cancelControl: prepCancelControl,
+    };
+  }
+
+  /**
+   * Retrieves the prepared photo for `photo`. If `photo` matches the lookahead item,
+   * awaits its preparation promise. Otherwise prepares `photo` directly.
+   * Clears the lookahead slot once consumed.
+   */
+  async getPrepared(
+    photo: GalleryPhotoItem,
+    cancelControl?: UploadCancellationControl,
+  ): Promise<PreparedPhoto> {
+    if (this.isPipelineCancelled || cancelControl?.isCancelled) {
+      throw new UploadCancelledError('Upload was cancelled.');
+    }
+
+    let prepPromise: Promise<PreparedPhoto>;
+
+    if (this.preparedItem && this.preparedItem.photoId === photo.id) {
+      prepPromise = this.preparedItem.promise;
+      this.preparedItem = null;
+    } else {
+      // Discard any existing lookahead if photo ID doesn't match
+      if (this.preparedItem) {
+        const discarded = this.preparedItem;
+        this.preparedItem = null;
+        discarded.cancelControl.cancel();
+        discarded.promise.then(p => p.cleanup()).catch(() => {});
+      }
+      prepPromise = preparePhotoForUpload(photo, cancelControl);
+    }
+
+    const prepared = await prepPromise;
+
+    // Guard against cancellation having occurred while waiting for preparation to finish
+    if (this.isPipelineCancelled || cancelControl?.isCancelled) {
+      await prepared.cleanup();
+      throw new UploadCancelledError('Upload was cancelled.');
+    }
+
+    return prepared;
+  }
+
+  /**
+   * Cancels any pending or in-progress lookahead preparation.
+   */
+  cancel(): void {
+    this.isPipelineCancelled = true;
+    if (this.preparedItem) {
+      this.preparedItem.cancelControl.cancel();
+    }
+  }
+
+  /**
+   * Cancels and cleans up any unconsumed lookahead item.
+   * Idempotent and safe to call multiple times or in finally blocks.
+   */
+  async cleanup(): Promise<void> {
+    this.isPipelineCancelled = true;
+    if (this.preparedItem) {
+      const itemToClean = this.preparedItem;
+      this.preparedItem = null;
+      itemToClean.cancelControl.cancel();
       try {
-        await cleanupTempFile(tempUri);
-      } catch (cleanupErr) {
-        console.warn(
-          '[photoUploadService] Unexpected error during temp file cleanup:',
-          tempUri,
-          cleanupErr,
-        );
+        const prepared = await itemToClean.promise;
+        await prepared.cleanup();
+      } catch {
+        // Failed or cancelled; preparePhotoForUpload cleans up its own temp files on error
       }
     }
   }
