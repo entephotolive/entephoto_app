@@ -13,6 +13,7 @@ import {
   Easing,
   Image,
   useWindowDimensions,
+  StatusBar,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -42,6 +43,7 @@ import {
   deleteLocalPhoto,
   PHOTO_STORAGE_DISPLAY_PATH,
   addPhotoScanListener,
+  addScanProgressListener,
   isPhotoScanInProgress,
   getPhotoScanSequenceId,
 } from '@/services/localPhotoService';
@@ -55,6 +57,7 @@ import {
 import { storageService } from '@/services/storageService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
+import { ClaymorphismLoader } from './components/ClaymorphismLoader';
 import { Image as ExpoImage } from 'expo-image';
 import { ImageWithSkeleton } from './components/ImageWithSkeleton';
 import {
@@ -239,6 +242,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const route = useRoute<RouteProp<AppStackParamList, 'PhotoSelectionGallery'>>();
   const { isDark } = useTheme();
   const insets = useSafeAreaInsets();
+  const topInset =
+    Platform.OS === 'android' ? Math.max(insets.top, StatusBar.currentHeight ?? 0) : insets.top;
   const { height: windowHeight } = useWindowDimensions();
 
   // Route Parameters
@@ -261,6 +266,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const isDockVisibleRef = React.useRef(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [initialScanError, setInitialScanError] = useState<string | null>(null);
+  // Filename of the file currently being processed during the initial scan.
+  // Populated by addScanProgressListener; cleared when loading finishes.
+  const [scanFilename, setScanFilename] = useState<string>('');
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
 
   // Uploading state
@@ -600,6 +608,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     });
     return () => {
       unsubscribeScanListener();
+    };
+  }, []);
+
+  // Subscribe to per-file scan progress to drive the claymorphism loader subtitle
+  useEffect(() => {
+    const unsub = addScanProgressListener(filename => {
+      setScanFilename(filename);
+    });
+    return () => {
+      unsub();
     };
   }, []);
 
@@ -1707,9 +1725,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
   return (
     <AppBackground>
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+      <SafeAreaView style={styles.safeArea} edges={['left', 'right']}>
         {/* ── 1. HEADER ROW ── */}
-        <View style={styles.headerRow}>
+        <View
+          style={[
+            styles.headerRow,
+            { paddingTop: topInset + (Platform.OS === 'android' ? 10 : 8) },
+          ]}
+        >
           {/* Tactile Back Button (Matching App Header Style) */}
           <TouchableOpacity
             activeOpacity={0.75}
@@ -2071,24 +2094,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => {
             if (isInitialLoading || (isPhotoScanning && !hasCompletedInitialScan)) {
-              return (
-                <View style={styles.loadingContainer}>
-                  <View
-                    style={[
-                      styles.loadingIconCircle,
-                      { backgroundColor: isDark ? '#26262E' : '#F4F4F5' },
-                    ]}
-                  >
-                    <ActivityIndicator size="large" color={isDark ? '#818CF8' : '#6366F1'} />
-                  </View>
-                  <Text style={[styles.loadingTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                    Loading Photos
-                  </Text>
-                  <Text style={[styles.loadingSubtitle, { color: isDark ? '#A1A1AA' : '#71717A' }]}>
-                    Scanning {PHOTO_STORAGE_DISPLAY_PATH}...
-                  </Text>
-                </View>
-              );
+              return <ClaymorphismLoader isVisible scanFilename={scanFilename} isDark={isDark} />;
             }
 
             if (initialScanError) {
@@ -2935,7 +2941,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingTop: 8,
     paddingBottom: 14,
   },
   backButton: {

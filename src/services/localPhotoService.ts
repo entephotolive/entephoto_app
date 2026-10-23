@@ -221,6 +221,32 @@ const scanListeners = new Set<(isScanning: boolean) => void>();
 let inFlightScanPromise: Promise<GalleryPhotoItem[]> | null = null;
 const cachedPhotosMap = new Map<string, GalleryPhotoItem>();
 
+// ── Scan Progress (Filename) Listeners ────────────────────────────────────────
+const scanProgressListeners = new Set<(filename: string) => void>();
+
+/**
+ * Subscribes to per-file scan progress events during an initial directory scan.
+ * The listener receives the filename (not the full path) of the file currently
+ * being processed. Updates are throttled to ~120 ms at the emission site.
+ * Returns an unsubscribe callback.
+ */
+export function addScanProgressListener(listener: (filename: string) => void): () => void {
+  scanProgressListeners.add(listener);
+  return () => {
+    scanProgressListeners.delete(listener);
+  };
+}
+
+function notifyScanProgressListeners(filename: string): void {
+  scanProgressListeners.forEach(listener => {
+    try {
+      listener(filename);
+    } catch {
+      // Never let a progress listener crash the scan
+    }
+  });
+}
+
 function notifyScanListeners(): void {
   const isScanning = activeScanCount > 0;
   scanListeners.forEach(listener => {
@@ -374,7 +400,16 @@ export async function scanDcimEntephotoPhotos(
       }
 
       const scannedPhotos: GalleryPhotoItem[] = [];
+      let lastProgressEmitMs = 0;
       for (const file of photoEntries) {
+        // Emit filename progress at most every 120 ms to avoid flooding the JS thread
+        if (!silent && scanProgressListeners.size > 0) {
+          const now = Date.now();
+          if (now - lastProgressEmitMs >= 120) {
+            lastProgressEmitMs = now;
+            notifyScanProgressListeners(file.name);
+          }
+        }
         const item = buildPhotoItemFromFile(file);
         if (item) {
           scannedPhotos.push(item);
