@@ -53,6 +53,7 @@ import {
   isValidObjectId,
   UploadCancellationControl,
   isUploadCancelledError,
+  checkExistingPhotos,
 } from '@/services/photoUploadService';
 import { storageService } from '@/services/storageService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
@@ -261,6 +262,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
   const [isPhotoScanning, setIsPhotoScanning] = useState(() => isPhotoScanInProgress());
   const [hasCompletedInitialScan, setHasCompletedInitialScan] = useState(false);
+  const [isInitialScanReady, setIsInitialScanReady] = useState(false);
   const latestAppliedScanSequenceRef = React.useRef<number>(0);
   const hasCompletedInitialScanRef = React.useRef(false);
   const isDockVisibleRef = React.useRef(false);
@@ -291,11 +293,15 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const [favoritePhotoIds, setFavoritePhotoIds] = useState<Set<string>>(new Set());
   const [isFavoritesLoaded, setIsFavoritesLoaded] = useState(false);
 
-  // Photos ref to access latest photo data inside long-running async workers without stale closures
+  // Photos and event refs to access latest data inside async callbacks without stale closures
   const photosRef = React.useRef(photos);
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
+  const eventIdRef = React.useRef(eventId);
+  useEffect(() => {
+    eventIdRef.current = eventId;
+  }, [eventId]);
 
   // Authoritative camera connection state from native manager
   const {
@@ -572,14 +578,26 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     });
   }, [favoritePhotoIds, isFavoritesLoaded]);
 
-  // Restore uploaded photo IDs from local storage on mount (scoped by eventId)
+  // Flow: Fetch existing server uploaded photos first, then signal readiness for local scan
   useEffect(() => {
-    let isMounted = true;
-    async function loadUploadedPhotos() {
-      if (!eventId) return;
+    let isCancelled = false;
+
+    async function initUploadedAndScan() {
+      setIsInitialScanReady(false);
+      setIsInitialLoading(true);
+
+      if (!eventId) {
+        if (!isCancelled) {
+          setIsInitialScanReady(true);
+        }
+        return;
+      }
+
+      // 1. Restore local storage uploaded photo keys for this event
       try {
         const savedKeys = await storageService.getUploadedPhotoKeys(eventId);
-        if (isMounted && savedKeys && savedKeys.length > 0) {
+        if (isCancelled) return;
+        if (savedKeys && savedKeys.length > 0) {
           const keySet = new Set(savedKeys);
           uploadedPhotoIdsRef.current = keySet;
           setUploadedPhotoIds(keySet);
@@ -595,10 +613,66 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       } catch (error) {
         console.error('[Gallery] Failed to load uploaded photos from storage:', error);
       }
+
+      // 2. Fetch server filenames BEFORE starting initial local scan
+      if (isValidObjectId(eventId)) {
+        try {
+          console.log(`[Gallery] Fetching existing photos from server for event: ${eventId}`);
+          const serverFilenames = await checkExistingPhotos(eventId);
+
+          if (isCancelled) {
+            console.log(
+              `[Gallery] Event changed or screen unmounted while fetching server photos for ${eventId} — discarding results.`,
+            );
+            return;
+          }
+
+          if (serverFilenames.length > 0) {
+            console.log(
+              `[Gallery] Server returned ${serverFilenames.length} existing photo filenames for event ${eventId}`,
+            );
+            const currentSet = new Set(uploadedPhotoIdsRef.current);
+            serverFilenames.forEach(name => currentSet.add(name));
+            uploadedPhotoIdsRef.current = currentSet;
+            setUploadedPhotoIds(new Set(currentSet));
+
+            // Persist the confirmed server filenames to local storage
+            await storageService.markPhotosUploaded(eventId, serverFilenames);
+
+            // Synchronously reflect uploaded status on already-loaded photos
+            photosRef.current = photosRef.current.map(p =>
+              isPhotoInUploadedSet(p, currentSet) ? { ...p, status: 'uploaded' } : p,
+            );
+            setPhotos(prev =>
+              prev.map(p =>
+                isPhotoInUploadedSet(p, currentSet) ? { ...p, status: 'uploaded' } : p,
+              ),
+            );
+          }
+        } catch (apiError) {
+          if (isCancelled) return;
+          // Record failure, preserve existing local uploaded statuses, continue to local scan
+          console.warn(
+            '[Gallery] Failed to fetch existing photos from server API (proceeding with local scan):',
+            apiError,
+          );
+        }
+      } else {
+        console.warn(
+          `[Gallery] eventId is not a valid 24-character hex ObjectId ("${eventId}"), skipping server existing-photo check`,
+        );
+      }
+
+      // 3. API request settled (success or failure) — signal readiness to start local scan
+      if (!isCancelled) {
+        setIsInitialScanReady(true);
+      }
     }
-    loadUploadedPhotos();
+
+    initUploadedAndScan();
+
     return () => {
-      isMounted = false;
+      isCancelled = true;
     };
   }, [eventId]);
 
@@ -625,6 +699,27 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
     const currentPhotos = photosRef.current;
     const uploadedSet = uploadedPhotoIdsRef.current;
+
+    // Map any local photo whose exact filename matches an entry in uploadedSet to its ID
+    const newlyMatchedIds: string[] = [];
+    for (const p of scanned) {
+      if (p.filename && uploadedSet.has(p.filename) && !uploadedSet.has(p.id)) {
+        uploadedSet.add(p.id);
+        newlyMatchedIds.push(p.id);
+      }
+    }
+
+    if (newlyMatchedIds.length > 0) {
+      uploadedPhotoIdsRef.current = new Set(uploadedSet);
+      setUploadedPhotoIds(new Set(uploadedSet));
+      const currentEvId = eventIdRef.current;
+      if (currentEvId) {
+        storageService.markPhotosUploaded(currentEvId, newlyMatchedIds).catch(err => {
+          console.warn('[Gallery] Failed to persist matched photo IDs to storage:', err);
+        });
+      }
+    }
+
     let merged: GalleryPhotoItem[];
 
     if (currentPhotos.length === 0) {
@@ -774,7 +869,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   }, [applyScannedPhotos]);
 
   // Subscribe to real-time DCIM folder changes (event-driven, no 2-second polling)
+  // Gated on isInitialScanReady so server existing-photos GET completes first.
   useEffect(() => {
+    if (!isInitialScanReady) return;
     let isMounted = true;
 
     const unsubscribe = subscribeToDcimPhotos(
@@ -804,7 +901,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       isMounted = false;
       unsubscribe();
     };
-  }, [applyScannedPhotos]);
+  }, [isInitialScanReady, applyScannedPhotos]);
 
   // Reconcile on screen focus (only if initial loading has already finished)
   useEffect(() => {

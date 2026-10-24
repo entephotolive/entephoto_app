@@ -1,5 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { ENV, API_ENDPOINTS } from '../config/api.config';
+import { apiClient } from './apiClient';
 import { GalleryPhotoItem } from '../screens/Gallery/PhotoSelectionGalleryScreen';
 import {
   compressToTargetSize,
@@ -577,4 +578,53 @@ export class UploadLookaheadPipeline {
       }
     }
   }
+}
+
+export interface CheckExistingPhotosResponse {
+  image_names: string[];
+}
+
+/**
+ * Checks with the backend for photos that have already been uploaded for the specified event.
+ *
+ * GET ${ENV.API_BASE_URL}/check-existing-photos/?event_id=<active-event-id>
+ *
+ * @param eventId 24-character hexadecimal ObjectId for the active event.
+ * @returns Array of exact original filenames already present in the server database.
+ * @throws Error on validation failure, network/HTTP error, or malformed response payload.
+ */
+export async function checkExistingPhotos(eventId: string): Promise<string[]> {
+  if (!isValidObjectId(eventId)) {
+    throw new Error(
+      `[photoUploadService] Invalid eventId: "${eventId}". Must be a 24-character hex MongoDB ObjectId.`,
+    );
+  }
+
+  const response = await apiClient.get<CheckExistingPhotosResponse>(
+    API_ENDPOINTS.PHOTOS.CHECK_EXISTING,
+    {
+      params: {
+        event_id: eventId.trim(),
+      },
+    },
+  );
+
+  if (
+    !response.data ||
+    typeof response.data !== 'object' ||
+    !Array.isArray(response.data.image_names)
+  ) {
+    throw new Error(
+      '[photoUploadService] Malformed response from check-existing-photos: expected image_names array.',
+    );
+  }
+
+  const names: string[] = [];
+  for (const name of response.data.image_names) {
+    if (typeof name === 'string' && name.length > 0) {
+      names.push(name);
+    }
+  }
+
+  return names;
 }

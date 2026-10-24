@@ -19,6 +19,7 @@ export const API_ENDPOINTS = {
     EVENT_DETAILS: (eventId: string) => `/event/${eventId}/`,
   },
   PHOTOS: {
+    CHECK_EXISTING: '/check-existing-photos/',
     UPLOAD: '/upload-images/',
     SCAN_FACE: '/scan-face/',
     MY_PHOTOS: '/my-photos/',
