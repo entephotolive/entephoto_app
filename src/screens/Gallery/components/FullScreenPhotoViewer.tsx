@@ -44,6 +44,7 @@ import {
   StatusBar,
   Platform,
   UIManager,
+  LayoutChangeEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import LottieView from 'lottie-react-native';
@@ -125,6 +126,35 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 // far to translate it offscreen when hidden.
 const BOTTOM_CHROME_HEIGHT = 220;
 
+/** Parses "WIDTHxHEIGHT" (e.g. "4000x3000") from photo metadata */
+function parseDimensions(dimStr?: string): { width: number; height: number } | null {
+  if (!dimStr) return null;
+  const parts = dimStr.split('x');
+  if (parts.length === 2) {
+    const w = parseFloat(parts[0]);
+    const h = parseFloat(parts[1]);
+    if (!isNaN(w) && !isNaN(h) && w > 0 && h > 0) {
+      return { width: w, height: h };
+    }
+  }
+  return null;
+}
+
+/**
+ * Calculates allowable pan translations per axis based on scaled image fit dimensions
+ * and the viewport size. If the scaled image fits within the viewport on an axis,
+ * maximum translation is 0 (keeping it centered).
+ */
+function getPanBounds(scaleVal: number, fitW: number, fitH: number, vpW: number, vpH: number) {
+  const scaledW = fitW * scaleVal;
+  const scaledH = fitH * scaleVal;
+
+  const maxPanX = scaledW > vpW ? (scaledW - vpW) / 2 : 0;
+  const maxPanY = scaledH > vpH ? (scaledH - vpH) / 2 : 0;
+
+  return { maxPanX, maxPanY };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 export interface FullScreenPhotoViewerProps {
   visible: boolean;
@@ -195,23 +225,150 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   const currentScale = useRef(1);
   const currentPanX = useRef(0);
   const currentPanY = useRef(0);
+  const startPanX = useRef(0);
+  const startPanY = useRef(0);
+
+  // ── Multi-touch / pinch gesture refs ─────────────────────────────────────────
+  const initialPinchDistance = useRef<number | null>(null);
+  const baseScale = useRef(1);
+  const basePanX = useRef(0);
+  const basePanY = useRef(0);
+  const initialFocalPoint = useRef<{ x: number; y: number } | null>(null);
+  const hasMultipleTouches = useRef(false);
+  const isPinching = useRef(false);
 
   const filmstripRef = useRef<FlatList>(null);
   const lastTapRef = useRef<number>(0);
 
   const currentPhoto = photos[currentIndex] || photos[0];
 
+  // ── Viewport and Image Fitted Dimensions ───────────────────────────────────
+  const [viewportSize, setViewportSize] = useState({ width: SCREEN_WIDTH, height: SCREEN_HEIGHT });
+  const viewportSizeRef = useRef(viewportSize);
+
+  useEffect(() => {
+    viewportSizeRef.current = viewportSize;
+  }, [viewportSize]);
+
+  const handleImageLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    if (width > 0 && height > 0) {
+      setViewportSize(prev => {
+        if (Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) return prev;
+        return { width, height };
+      });
+    }
+  }, []);
+
+  const [loadedPhotoId, setLoadedPhotoId] = useState<string | null>(null);
+  const [loadedSize, setLoadedSize] = useState<{ width: number; height: number } | null>(null);
+
+  if (currentPhoto && currentPhoto.id !== loadedPhotoId) {
+    setLoadedPhotoId(currentPhoto.id);
+    setLoadedSize(null);
+  }
+
+  const parsedDimensions = useMemo(() => {
+    return parseDimensions(currentPhoto?.dimensions);
+  }, [currentPhoto?.dimensions]);
+
+  useEffect(() => {
+    if (currentPhoto?.uri && !parsedDimensions && !loadedSize) {
+      Image.getSize(
+        currentPhoto.uri,
+        (width, height) => {
+          if (width > 0 && height > 0) {
+            setLoadedSize({ width, height });
+          }
+        },
+        () => {},
+      );
+    }
+  }, [currentPhoto?.uri, parsedDimensions, loadedSize]);
+
+  const imageSize = loadedSize || parsedDimensions;
+
+  const fittedDimensions = useMemo(() => {
+    const vpW = viewportSize.width;
+    const vpH = viewportSize.height;
+
+    if (!imageSize || imageSize.width <= 0 || imageSize.height <= 0) {
+      return { width: vpW, height: vpH };
+    }
+
+    const imgAspect = imageSize.width / imageSize.height;
+    const vpAspect = vpW / vpH;
+
+    let fitW = vpW;
+    let fitH = vpH;
+
+    if (imgAspect > vpAspect) {
+      // Wider than viewport -> fit horizontally
+      fitW = vpW;
+      fitH = vpW / imgAspect;
+    } else {
+      // Taller than viewport -> fit vertically
+      fitH = vpH;
+      fitW = vpH * imgAspect;
+    }
+
+    return { width: fitW, height: fitH };
+  }, [viewportSize, imageSize]);
+
+  const fittedDimensionsRef = useRef(fittedDimensions);
+
+  useEffect(() => {
+    fittedDimensionsRef.current = fittedDimensions;
+  }, [fittedDimensions]);
+
   // ── Helpers ────────────────────────────────────────────────────────────────
   const resetZoom = useCallback(() => {
+    scale.stopAnimation();
+    panX.stopAnimation();
+    panY.stopAnimation();
     currentScale.current = 1;
     currentPanX.current = 0;
     currentPanY.current = 0;
+    startPanX.current = 0;
+    startPanY.current = 0;
+    basePanX.current = 0;
+    basePanY.current = 0;
+    initialPinchDistance.current = null;
+    baseScale.current = 1;
+    initialFocalPoint.current = null;
+    hasMultipleTouches.current = false;
+    isPinching.current = false;
     Animated.parallel([
       Animated.spring(scale, { toValue: 1, useNativeDriver: true }),
       Animated.spring(panX, { toValue: 0, useNativeDriver: true }),
       Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
     ]).start();
   }, [scale, panX, panY]);
+
+  // ── Re-clamp pan when viewport or fitted dimensions change ─────────────────
+  useEffect(() => {
+    if (currentScale.current > 1) {
+      const { maxPanX, maxPanY } = getPanBounds(
+        currentScale.current,
+        fittedDimensions.width,
+        fittedDimensions.height,
+        viewportSize.width,
+        viewportSize.height,
+      );
+      const clampedX = Math.max(-maxPanX, Math.min(currentPanX.current, maxPanX));
+      const clampedY = Math.max(-maxPanY, Math.min(currentPanY.current, maxPanY));
+      if (clampedX !== currentPanX.current || clampedY !== currentPanY.current) {
+        currentPanX.current = clampedX;
+        currentPanY.current = clampedY;
+        basePanX.current = clampedX;
+        basePanY.current = clampedY;
+        startPanX.current = clampedX;
+        startPanY.current = clampedY;
+        panX.setValue(clampedX);
+        panY.setValue(clampedY);
+      }
+    }
+  }, [viewportSize, fittedDimensions, panX, panY]);
 
   // ── Reset animations when viewer opens ─────────────────────────────────────
   useEffect(() => {
@@ -223,6 +380,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
       resetZoom();
     }
   }, [visible, bottomSlideY, headerOpacity, dismissTranslateY, dismissOpacity, resetZoom]);
+
+  // ── Reset zoom on photo change ─────────────────────────────────────────────
+  useEffect(() => {
+    resetZoom();
+  }, [currentIndex, resetZoom]);
 
   // ── Scroll filmstrip to keep active photo centred ──────────────────────────
   useEffect(() => {
@@ -302,18 +464,57 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
     ]).start(() => onClose());
   }, [dismissTranslateY, dismissOpacity, onClose]);
 
-  const handleDoubleTap = useCallback(() => {
-    if (currentScale.current > 1.2) {
-      resetZoom();
-    } else {
-      currentScale.current = 2.4;
-      Animated.parallel([
-        Animated.spring(scale, { toValue: 2.4, useNativeDriver: true }),
-        Animated.spring(panX, { toValue: 0, useNativeDriver: true }),
-        Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
-      ]).start();
-    }
-  }, [resetZoom, scale, panX, panY]);
+  const handleDoubleTap = useCallback(
+    (tapX?: number, tapY?: number) => {
+      if (currentScale.current > 1.2) {
+        resetZoom();
+      } else {
+        scale.stopAnimation();
+        panX.stopAnimation();
+        panY.stopAnimation();
+
+        const targetScale = 2.4;
+        currentScale.current = targetScale;
+        initialPinchDistance.current = null;
+        baseScale.current = targetScale;
+        initialFocalPoint.current = null;
+        hasMultipleTouches.current = false;
+        isPinching.current = false;
+
+        const vpW = viewportSizeRef.current.width;
+        const vpH = viewportSizeRef.current.height;
+        const fit = fittedDimensionsRef.current;
+        const { maxPanX, maxPanY } = getPanBounds(targetScale, fit.width, fit.height, vpW, vpH);
+
+        let targetPanX = 0;
+        let targetPanY = 0;
+
+        if (tapX !== undefined && tapY !== undefined) {
+          const fRelX = tapX - vpW / 2;
+          const fRelY = tapY - vpH / 2;
+          targetPanX = fRelX * (1 - targetScale);
+          targetPanY = fRelY * (1 - targetScale);
+        }
+
+        targetPanX = Math.max(-maxPanX, Math.min(targetPanX, maxPanX));
+        targetPanY = Math.max(-maxPanY, Math.min(targetPanY, maxPanY));
+
+        currentPanX.current = targetPanX;
+        currentPanY.current = targetPanY;
+        basePanX.current = targetPanX;
+        basePanY.current = targetPanY;
+        startPanX.current = targetPanX;
+        startPanY.current = targetPanY;
+
+        Animated.parallel([
+          Animated.spring(scale, { toValue: targetScale, useNativeDriver: true }),
+          Animated.spring(panX, { toValue: targetPanX, useNativeDriver: true }),
+          Animated.spring(panY, { toValue: targetPanY, useNativeDriver: true }),
+        ]).start();
+      }
+    },
+    [resetZoom, scale, panX, panY],
+  );
 
   const handleDelete = useCallback(() => {
     if (!currentPhoto) return;
@@ -378,39 +579,223 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         if (currentScale.current > 1) return true;
         return Math.abs(g.dx) > 8 || Math.abs(g.dy) > 8;
       },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: (evt, g) => {
+        scale.stopAnimation();
+        panX.stopAnimation();
+        panY.stopAnimation();
+        startPanX.current = currentPanX.current;
+        startPanY.current = currentPanY.current;
+        basePanX.current = currentPanX.current;
+        basePanY.current = currentPanY.current;
+
+        const touches = evt.nativeEvent.touches;
+        if (g.numberActiveTouches >= 2 || (touches && touches.length >= 2)) {
+          hasMultipleTouches.current = true;
+          isPinching.current = true;
+          if (touches && touches.length >= 2) {
+            const t1 = touches[0];
+            const t2 = touches[1];
+            initialPinchDistance.current = Math.hypot(t1.pageX - t2.pageX, t1.pageY - t2.pageY);
+            baseScale.current = currentScale.current;
+            basePanX.current = currentPanX.current;
+            basePanY.current = currentPanY.current;
+            initialFocalPoint.current = {
+              x: (t1.pageX + t2.pageX) / 2,
+              y: (t1.pageY + t2.pageY) / 2,
+            };
+          }
+        } else {
+          hasMultipleTouches.current = false;
+          isPinching.current = false;
+          initialPinchDistance.current = null;
+          initialFocalPoint.current = null;
+        }
+      },
       onPanResponderMove: (evt, g) => {
-        // Pinch-to-zoom
-        if (g.numberActiveTouches >= 2 && evt.nativeEvent.touches?.length >= 2) {
-          const t1 = evt.nativeEvent.touches[0];
-          const t2 = evt.nativeEvent.touches[1];
-          const dist = Math.hypot(t1.pageX - t2.pageX, t1.pageY - t2.pageY);
-          const ns = Math.max(1, Math.min(dist / 160, 3.5));
-          currentScale.current = ns;
-          scale.setValue(ns);
+        const touches = evt.nativeEvent.touches;
+        const activeTouchCount = touches ? touches.length : g.numberActiveTouches;
+
+        // Multi-touch pinch detection
+        if (activeTouchCount >= 2 && touches && touches.length >= 2) {
+          hasMultipleTouches.current = true;
+          const t1 = touches[0];
+          const t2 = touches[1];
+          const currentDist = Math.hypot(t1.pageX - t2.pageX, t1.pageY - t2.pageY);
+          const currentFX = (t1.pageX + t2.pageX) / 2;
+          const currentFY = (t1.pageY + t2.pageY) / 2;
+
+          if (initialPinchDistance.current == null || !isPinching.current) {
+            // First moment 2 touches are detected during move
+            initialPinchDistance.current = currentDist > 0 ? currentDist : 1;
+            baseScale.current = currentScale.current;
+
+            const vpW = viewportSizeRef.current.width;
+            const vpH = viewportSizeRef.current.height;
+            const fit = fittedDimensionsRef.current;
+            const { maxPanX, maxPanY } = getPanBounds(
+              currentScale.current,
+              fit.width,
+              fit.height,
+              vpW,
+              vpH,
+            );
+
+            const livePanX =
+              currentScale.current > 1
+                ? Math.max(-maxPanX, Math.min(startPanX.current + g.dx, maxPanX))
+                : currentPanX.current;
+            const livePanY =
+              currentScale.current > 1
+                ? Math.max(-maxPanY, Math.min(startPanY.current + g.dy, maxPanY))
+                : currentPanY.current;
+
+            basePanX.current = livePanX;
+            basePanY.current = livePanY;
+            currentPanX.current = livePanX;
+            currentPanY.current = livePanY;
+
+            initialFocalPoint.current = {
+              x: currentFX,
+              y: currentFY,
+            };
+            isPinching.current = true;
+          } else {
+            const ratio = currentDist / initialPinchDistance.current;
+            const newScale = Math.max(1, Math.min(baseScale.current * ratio, 3.5));
+
+            const vpW = viewportSizeRef.current.width;
+            const vpH = viewportSizeRef.current.height;
+            const vpCenterX = vpW / 2;
+            const vpCenterY = vpH / 2;
+
+            const f0 = initialFocalPoint.current || { x: currentFX, y: currentFY };
+            const fRel0X = f0.x - vpCenterX;
+            const fRel0Y = f0.y - vpCenterY;
+            const fRel1X = currentFX - vpCenterX;
+            const fRel1Y = currentFY - vpCenterY;
+
+            const scaleRatio = baseScale.current > 0 ? newScale / baseScale.current : 1;
+            let newPanX = fRel1X - (fRel0X - basePanX.current) * scaleRatio;
+            let newPanY = fRel1Y - (fRel0Y - basePanY.current) * scaleRatio;
+
+            const fit = fittedDimensionsRef.current;
+            const { maxPanX, maxPanY } = getPanBounds(newScale, fit.width, fit.height, vpW, vpH);
+
+            newPanX = Math.max(-maxPanX, Math.min(newPanX, maxPanX));
+            newPanY = Math.max(-maxPanY, Math.min(newPanY, maxPanY));
+
+            currentScale.current = newScale;
+            currentPanX.current = newPanX;
+            currentPanY.current = newPanY;
+
+            scale.setValue(newScale);
+            panX.setValue(newPanX);
+            panY.setValue(newPanY);
+          }
           return;
         }
-        // Pan when zoomed
+
+        // If this gesture interaction ever involved multiple touches, do not let
+        // a remaining single finger trigger photo navigation or swipe dismiss!
+        if (hasMultipleTouches.current || isPinching.current) {
+          return;
+        }
+
+        // Pan when zoomed (pure 1-finger gesture)
         if (currentScale.current > 1) {
-          const mX = (SCREEN_WIDTH * (currentScale.current - 1)) / 2;
-          const mY = (SCREEN_HEIGHT * (currentScale.current - 1)) / 2;
-          panX.setValue(Math.max(-mX, Math.min(currentPanX.current + g.dx, mX)));
-          panY.setValue(Math.max(-mY, Math.min(currentPanY.current + g.dy, mY)));
+          const vpW = viewportSizeRef.current.width;
+          const vpH = viewportSizeRef.current.height;
+          const fit = fittedDimensionsRef.current;
+          const { maxPanX, maxPanY } = getPanBounds(
+            currentScale.current,
+            fit.width,
+            fit.height,
+            vpW,
+            vpH,
+          );
+
+          const targetX = Math.max(-maxPanX, Math.min(startPanX.current + g.dx, maxPanX));
+          const targetY = Math.max(-maxPanY, Math.min(startPanY.current + g.dy, maxPanY));
+
+          currentPanX.current = targetX;
+          currentPanY.current = targetY;
+          panX.setValue(targetX);
+          panY.setValue(targetY);
           return;
         }
-        // Swipe-down dismiss feedback
+
+        // Swipe-down dismiss feedback (pure 1-finger gesture at 1x)
         if (g.dy > 0 && Math.abs(g.dy) > Math.abs(g.dx)) {
           dismissTranslateY.setValue(g.dy);
           dismissOpacity.setValue(Math.max(0.3, 1 - g.dy / (SCREEN_HEIGHT * 0.6)));
         }
       },
-      onPanResponderRelease: (_, g) => {
+      onPanResponderRelease: (evt, g) => {
+        const hadMultiTouches = hasMultipleTouches.current || isPinching.current;
+
+        // Reset multi-touch refs for the next interaction
+        initialPinchDistance.current = null;
+        baseScale.current = currentScale.current;
+        basePanX.current = currentPanX.current;
+        basePanY.current = currentPanY.current;
+        initialFocalPoint.current = null;
+        hasMultipleTouches.current = false;
+        isPinching.current = false;
+
+        // Multi-touch gestures must NEVER trigger photo navigation or tap toggles
+        if (hadMultiTouches) {
+          const vpW = viewportSizeRef.current.width;
+          const vpH = viewportSizeRef.current.height;
+          const fit = fittedDimensionsRef.current;
+
+          if (currentScale.current <= 1.05) {
+            // Pinched back down to ~1x -> cleanly spring back to 1.0 and zero pan
+            currentScale.current = 1;
+            currentPanX.current = 0;
+            currentPanY.current = 0;
+            startPanX.current = 0;
+            startPanY.current = 0;
+            basePanX.current = 0;
+            basePanY.current = 0;
+            Animated.parallel([
+              Animated.spring(scale, { toValue: 1, useNativeDriver: true }),
+              Animated.spring(panX, { toValue: 0, useNativeDriver: true }),
+              Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
+            ]).start();
+          } else {
+            // Clamp pan offsets within bounds of current scale
+            const { maxPanX, maxPanY } = getPanBounds(
+              currentScale.current,
+              fit.width,
+              fit.height,
+              vpW,
+              vpH,
+            );
+            currentPanX.current = Math.max(-maxPanX, Math.min(currentPanX.current, maxPanX));
+            currentPanY.current = Math.max(-maxPanY, Math.min(currentPanY.current, maxPanY));
+            basePanX.current = currentPanX.current;
+            basePanY.current = currentPanY.current;
+            startPanX.current = currentPanX.current;
+            startPanY.current = currentPanY.current;
+            Animated.parallel([
+              Animated.spring(panX, { toValue: currentPanX.current, useNativeDriver: true }),
+              Animated.spring(panY, { toValue: currentPanY.current, useNativeDriver: true }),
+            ]).start();
+          }
+          return;
+        }
+
         const now = Date.now();
         // Tap (no significant movement)
         if (Math.abs(g.dx) < 10 && Math.abs(g.dy) < 10) {
           if (now - lastTapRef.current < 280) {
             // Double-tap
             lastTapRef.current = 0;
-            handlersRef.current.handleDoubleTap();
+            handlersRef.current.handleDoubleTap(
+              evt.nativeEvent.pageX ?? g.x0,
+              evt.nativeEvent.pageY ?? g.y0,
+            );
           } else {
             // Single-tap → toggle chrome
             lastTapRef.current = now;
@@ -422,12 +807,33 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           }
           return;
         }
+
         // Zoomed pan release – commit offset
         if (currentScale.current > 1) {
-          currentPanX.current += g.dx;
-          currentPanY.current += g.dy;
+          const vpW = viewportSizeRef.current.width;
+          const vpH = viewportSizeRef.current.height;
+          const fit = fittedDimensionsRef.current;
+          const { maxPanX, maxPanY } = getPanBounds(
+            currentScale.current,
+            fit.width,
+            fit.height,
+            vpW,
+            vpH,
+          );
+
+          const targetX = Math.max(-maxPanX, Math.min(startPanX.current + g.dx, maxPanX));
+          const targetY = Math.max(-maxPanY, Math.min(startPanY.current + g.dy, maxPanY));
+          currentPanX.current = targetX;
+          currentPanY.current = targetY;
+          basePanX.current = targetX;
+          basePanY.current = targetY;
+          startPanX.current = targetX;
+          startPanY.current = targetY;
+          panX.setValue(targetX);
+          panY.setValue(targetY);
           return;
         }
+
         // Swipe-down dismiss
         if (g.dy > 120 || (g.dy > 40 && g.vy > 0.6)) {
           handlersRef.current.handleDismiss();
@@ -438,10 +844,51 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
             Animated.spring(dismissOpacity, { toValue: 1, useNativeDriver: true }),
           ]).start();
         }
-        // Horizontal swipe
+
+        // Horizontal swipe (only when unzoomed and pure 1-finger)
         if (Math.abs(g.dx) > 55 || Math.abs(g.vx) > 0.45) {
           if (g.dx > 0) handlersRef.current.handlePrevPhoto();
           else handlersRef.current.handleNextPhoto();
+        }
+      },
+      onPanResponderTerminate: () => {
+        initialPinchDistance.current = null;
+        baseScale.current = currentScale.current;
+        initialFocalPoint.current = null;
+        hasMultipleTouches.current = false;
+        isPinching.current = false;
+        if (currentScale.current <= 1.05) {
+          currentScale.current = 1;
+          currentPanX.current = 0;
+          currentPanY.current = 0;
+          startPanX.current = 0;
+          startPanY.current = 0;
+          basePanX.current = 0;
+          basePanY.current = 0;
+          Animated.parallel([
+            Animated.spring(scale, { toValue: 1, useNativeDriver: true }),
+            Animated.spring(panX, { toValue: 0, useNativeDriver: true }),
+            Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
+          ]).start();
+        } else {
+          const vpW = viewportSizeRef.current.width;
+          const vpH = viewportSizeRef.current.height;
+          const fit = fittedDimensionsRef.current;
+          const { maxPanX, maxPanY } = getPanBounds(
+            currentScale.current,
+            fit.width,
+            fit.height,
+            vpW,
+            vpH,
+          );
+          currentPanX.current = Math.max(-maxPanX, Math.min(currentPanX.current, maxPanX));
+          currentPanY.current = Math.max(-maxPanY, Math.min(currentPanY.current, maxPanY));
+          startPanX.current = currentPanX.current;
+          startPanY.current = currentPanY.current;
+          basePanX.current = currentPanX.current;
+          basePanY.current = currentPanY.current;
+          panX.setValue(currentPanX.current);
+          panY.setValue(currentPanY.current);
         }
       },
     }),
@@ -483,16 +930,36 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         {/* ═══════════════════════════════════════════════════════════════════
             LAYER 0 — Full-bleed black canvas + photo at natural aspect ratio
         ═══════════════════════════════════════════════════════════════════ */}
-        <View style={styles.imageLayer} {...panResponder.panHandlers}>
+        <View style={styles.imageLayer} onLayout={handleImageLayout} {...panResponder.panHandlers}>
           <Animated.View
             style={[
               styles.imageTransformWrapper,
-              { transform: [{ scale }, { translateX: panX }, { translateY: panY }] },
+              {
+                width: viewportSize.width,
+                height: viewportSize.height,
+                transform: [{ translateX: panX }, { translateY: panY }, { scale }],
+              },
             ]}
           >
             {/* resizeMode="contain" → photo shown at native aspect ratio,
                 letterboxed with black bars so nothing is cropped */}
-            <Image source={{ uri: currentPhoto.uri }} style={styles.photo} resizeMode="contain" />
+            <Image
+              source={{ uri: currentPhoto.uri }}
+              style={[
+                styles.photo,
+                {
+                  width: fittedDimensions.width,
+                  height: fittedDimensions.height,
+                },
+              ]}
+              resizeMode="contain"
+              onLoad={evt => {
+                const { width, height } = evt.nativeEvent.source;
+                if (width > 0 && height > 0) {
+                  setLoadedSize({ width, height });
+                }
+              }}
+            />
           </Animated.View>
         </View>
 
