@@ -14,6 +14,7 @@ import {
   Image,
   useWindowDimensions,
   StatusBar,
+  InteractionManager,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -43,7 +44,6 @@ import {
   deleteLocalPhoto,
   PHOTO_STORAGE_DISPLAY_PATH,
   addPhotoScanListener,
-  addScanProgressListener,
   isPhotoScanInProgress,
   getPhotoScanSequenceId,
 } from '@/services/localPhotoService';
@@ -266,10 +266,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const isDockVisibleRef = React.useRef(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [initialScanError, setInitialScanError] = useState<string | null>(null);
-  // Filename of the file currently being processed during the initial scan.
-  // Populated by addScanProgressListener; cleared when loading finishes.
-  const [scanFilename, setScanFilename] = useState<string>('');
   const [isActionsModalVisible, setIsActionsModalVisible] = useState(false);
+  // True only during an explicit user-triggered Rescan (separate from initial loading).
+  // Shows the ClaymorphismLoader as an overlay even when photos are already loaded.
+  const [isRescanLoading, setIsRescanLoading] = useState(false);
+  const isRescanInProgressRef = React.useRef(false);
 
   // Uploading state
   const isUploadingRef = React.useRef(false);
@@ -611,16 +612,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     };
   }, []);
 
-  // Subscribe to per-file scan progress to drive the claymorphism loader subtitle
-  useEffect(() => {
-    const unsub = addScanProgressListener(filename => {
-      setScanFilename(filename);
-    });
-    return () => {
-      unsub();
-    };
-  }, []);
-
   // Helper to merge newly scanned photos with authoritative upload state and queue uploads
   const applyScannedPhotos = useCallback((scanned: GalleryPhotoItem[]) => {
     const seq = getPhotoScanSequenceId(scanned);
@@ -705,6 +696,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     setIsInitialLoading(true);
     setInitialScanError(null);
     try {
+      await new Promise<void>(resolve => {
+        requestAnimationFrame(() => {
+          setTimeout(resolve, 0);
+        });
+      });
       const scanned = await scanDcimEntephotoPhotos(false, true);
       applyScannedPhotos(scanned);
       setInitialScanError(null);
@@ -720,7 +716,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     }
   }, [applyScannedPhotos]);
 
-  // Manual rescan handler (explicit full scan from Action Sheet)
+  // Background reconciliation rescan (focus listener, subscription callbacks).
+  // Does NOT show the ClaymorphismLoader — must stay silent and fast.
   const handleManualRescan = useCallback(async () => {
     try {
       const scanned = await scanDcimEntephotoPhotos(false, true);
@@ -735,6 +732,44 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
         );
       }
+    }
+  }, [applyScannedPhotos]);
+
+  // Explicit user-triggered rescan (Action Sheet + empty-gallery button).
+  // Shows the ClaymorphismLoader for the duration of the scan. Guards against
+  // duplicate concurrent taps via isRescanInProgressRef.
+  const handleUserRescan = useCallback(async () => {
+    if (isRescanInProgressRef.current) {
+      console.log('[Gallery] Rescan already in progress — ignoring duplicate request.');
+      return;
+    }
+    isRescanInProgressRef.current = true;
+    setIsRescanLoading(true);
+    try {
+      // Yield to allow React Native to render and paint the loader overlay before heavy scan,
+      // and allow any open modal dismiss animations to settle smoothly.
+      await new Promise<void>(resolve => {
+        InteractionManager.runAfterInteractions(() => {
+          requestAnimationFrame(() => {
+            resolve();
+          });
+        });
+      });
+      const scanned = await scanDcimEntephotoPhotos(false, true);
+      applyScannedPhotos(scanned);
+      setInitialScanError(null);
+      setHasCompletedInitialScan(true);
+      hasCompletedInitialScanRef.current = true;
+    } catch (err: any) {
+      console.error('[Gallery] User rescan failed:', err);
+      if (photosRef.current.length === 0) {
+        setInitialScanError(
+          err?.message || `Failed to scan photos from ${PHOTO_STORAGE_DISPLAY_PATH}`,
+        );
+      }
+    } finally {
+      setIsRescanLoading(false);
+      isRescanInProgressRef.current = false;
     }
   }, [applyScannedPhotos]);
 
@@ -1030,11 +1065,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     );
   }, [photos, selectedPhotoIds]);
 
-  // Rescan Trigger from Action Sheet
+  // Rescan Trigger from Action Sheet — uses explicit user rescan with loading overlay
   const handleRescanFromSheet = useCallback(async () => {
     setIsActionsModalVisible(false);
-    await handleManualRescan();
-  }, [handleManualRescan]);
+    await handleUserRescan();
+  }, [handleUserRescan]);
 
   // ── ALL UPLOAD QUEUE WORKER & CONTROLLER ──
 
@@ -2042,8 +2077,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           </View>
         )}
 
-        {/* ── TOP REFRESH SPINNER (Visible during subsequent background or manual refreshes when photos exist) ── */}
-        {isPhotoScanning && photos.length > 0 && (
+        {/* ── TOP REFRESH SPINNER (Visible during subsequent background or manual refreshes when photos exist and full overlay is not active) ── */}
+        {isPhotoScanning && !isRescanLoading && photos.length > 0 && (
           <View
             style={styles.topSpinnerContainer}
             pointerEvents="none"
@@ -2066,7 +2101,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               favoritePhotoIds,
               uploadedPhotoIds,
               isInitialLoading,
-              isPhotoScanning,
               initialScanError,
             ],
             [
@@ -2074,7 +2108,6 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
               favoritePhotoIds,
               uploadedPhotoIds,
               isInitialLoading,
-              isPhotoScanning,
               initialScanError,
             ],
           )}
@@ -2094,7 +2127,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           stickySectionHeadersEnabled={false}
           ListEmptyComponent={() => {
             if (isInitialLoading || (isPhotoScanning && !hasCompletedInitialScan)) {
-              return <ClaymorphismLoader isVisible scanFilename={scanFilename} isDark={isDark} />;
+              return <ClaymorphismLoader isVisible isDark={isDark} />;
             }
 
             if (initialScanError) {
@@ -2235,7 +2268,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 {/* Primary Action Button */}
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={handleManualRescan}
+                  onPress={handleUserRescan}
                   style={[
                     styles.emptyRefreshBtn,
                     {
@@ -2269,6 +2302,19 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             );
           }}
         />
+
+        {/* ── RESCAN OVERLAY LOADER — absolute overlay within gallery content area, visible
+             even when photos already exist (ListEmptyComponent does not render in that case) ── */}
+        {isRescanLoading && (
+          <View
+            style={[styles.rescanOverlay, isDark && { backgroundColor: 'rgba(18, 18, 18, 0.88)' }]}
+            pointerEvents="none"
+            accessibilityRole="progressbar"
+            accessibilityLabel="Rescanning photos"
+          >
+            <ClaymorphismLoader isVisible isDark={isDark} />
+          </View>
+        )}
 
         {/* ── 4. FLOATING BOTTOM ACTION DOCK ── */}
         <Animated.View
@@ -2589,6 +2635,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onUploadPhoto={handleUploadSinglePhoto}
           onDeletePhoto={handleDeletePhoto}
           isDark={isDark}
+          isUploading={isUploading}
         />
 
         {/* ── 6. MATCHING THEME GALLERY ACTIONS SHEET ── */}
@@ -3063,6 +3110,22 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 8,
   },
+  rescanOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Slightly translucent so the user can see there is a gallery beneath
+    backgroundColor: 'rgba(250, 246, 240, 0.88)',
+    zIndex: 50,
+    ...Platform.select({
+      android: { elevation: 20 },
+    }),
+  },
+
   topSpinnerText: {
     fontFamily: FONTS.plusJakartaSans.medium,
     fontSize: 12,

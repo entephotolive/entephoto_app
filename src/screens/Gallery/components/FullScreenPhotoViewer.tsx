@@ -43,8 +43,10 @@ import {
   PanResponder,
   StatusBar,
   Platform,
+  UIManager,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import LottieView from 'lottie-react-native';
 import {
   ArrowLeft,
   ChevronLeft,
@@ -58,6 +60,63 @@ import {
 import { Text } from '@/components/Text';
 import { FONTS } from '@/constants/typography';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
+
+// ── Lottie Cloud Upload Icon ─────────────────────────────────────────────────
+// Primary asset: Free Cloud Upload Animation by Esko Ahonen (bundled locally).
+// - Idle state: displays the static white Lucide CloudUpload icon (no animation playback).
+// - Uploading state: plays the bundled Lottie cloud-upload animation (pure white on EntePhoto orange),
+//   looping continuously while the upload operation is active.
+// - Finished / Stopped: cleanly resets and returns to the static icon.
+// - Safety guard: verifies native LottieAnimationViewManager presence before mounting LottieView
+//   to protect against crashes on pre-rebuild dev-client APKs.
+const cloudUploadAnimation = require('../../../../assets/animations/cloud-upload.json');
+
+const isLottieNativeAvailable = Boolean(
+  UIManager.getViewManagerConfig?.('LottieAnimationView') ||
+  (UIManager as any)?.LottieAnimationView,
+);
+
+interface AnimatedUploadIconProps {
+  isUploading: boolean;
+  color?: string;
+  size?: number;
+}
+
+const AnimatedUploadIcon = React.memo(
+  ({ isUploading, color = '#FFFFFF', size = 26 }: AnimatedUploadIconProps) => {
+    const animationRef = useRef<LottieView>(null);
+
+    useEffect(() => {
+      const anim = animationRef.current;
+      if (isUploading && isLottieNativeAvailable) {
+        anim?.play();
+      } else {
+        anim?.reset();
+      }
+      return () => {
+        anim?.reset();
+      };
+    }, [isUploading]);
+
+    if (!isUploading || !isLottieNativeAvailable) {
+      return <CloudUpload size={size} color={color} strokeWidth={2.4} />;
+    }
+
+    return (
+      <View style={styles.lottieIconContainer} pointerEvents="none">
+        <LottieView
+          ref={animationRef}
+          source={cloudUploadAnimation}
+          autoPlay
+          loop
+          style={styles.uploadLottie}
+          renderMode="HARDWARE"
+        />
+      </View>
+    );
+  },
+);
+AnimatedUploadIcon.displayName = 'AnimatedUploadIcon';
 
 // ─────────────────────────────────────────────────────────────────────────────
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -82,6 +141,8 @@ export interface FullScreenPhotoViewerProps {
   onUploadPhoto: (photo: GalleryPhotoItem) => void;
   onDeletePhoto: (photo: GalleryPhotoItem) => void;
   isDark?: boolean;
+  /** True while a gallery-level upload is active for the current photo */
+  isUploading?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +159,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   uploadedPhotoIds,
   onUploadPhoto,
   onDeletePhoto,
+  isUploading = false,
 }) => {
   const insets = useSafeAreaInsets();
 
@@ -617,12 +679,20 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
                   { transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }] },
                 ]}
                 accessibilityRole="button"
-                accessibilityLabel="Upload photo"
+                accessibilityLabel={
+                  isUploading ? 'Uploading…' : isUploaded ? 'Uploaded' : 'Upload photo'
+                }
               >
                 <View style={[styles.dockHeroBox, isUploaded && styles.dockHeroBoxUploaded]}>
-                  <CloudUpload size={26} color="#FFFFFF" strokeWidth={2.4} />
+                  <AnimatedUploadIcon
+                    isUploading={isUploading && !isUploaded}
+                    color="#FFFFFF"
+                    size={26}
+                  />
                 </View>
-                <Text style={styles.dockHeroLabel}>{isUploaded ? 'Uploaded' : 'Upload'}</Text>
+                <Text style={styles.dockHeroLabel}>
+                  {isUploaded ? 'Uploaded' : isUploading ? 'Uploading…' : 'Upload'}
+                </Text>
               </Pressable>
 
               {/* DELETE */}
@@ -962,5 +1032,15 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#161616',
     textAlign: 'center',
+  },
+  lottieIconContainer: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadLottie: {
+    width: 32,
+    height: 32,
   },
 });

@@ -399,9 +399,13 @@ export async function scanDcimEntephotoPhotos(
         }
       }
 
+      // Yield after synchronous directory listing so UI can paint before per-file metadata extraction
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+
       const scannedPhotos: GalleryPhotoItem[] = [];
       let lastProgressEmitMs = 0;
-      for (const file of photoEntries) {
+      for (let i = 0; i < photoEntries.length; i++) {
+        const file = photoEntries[i];
         // Emit filename progress at most every 120 ms to avoid flooding the JS thread
         if (!silent && scanProgressListeners.size > 0) {
           const now = Date.now();
@@ -413,6 +417,12 @@ export async function scanDcimEntephotoPhotos(
         const item = buildPhotoItemFromFile(file);
         if (item) {
           scannedPhotos.push(item);
+        }
+
+        // Periodically yield to event loop every 12 items so native animation frames,
+        // gesture handling, and UI updates run smoothly without JS-thread blocking.
+        if (i > 0 && i % 12 === 0) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
         }
       }
 
