@@ -4,6 +4,14 @@
  * Layout:  Full-bleed black background, photo shown at native aspect ratio
  *          (resizeMode="contain"), chrome overlaid as absolute layers.
  *
+ * Natural Device Auto-Rotation:
+ *   - Device auto-rotation is unlocked while the viewer is visible.
+ *   - Follows native Android screen orientation directly without manual canvas rotation.
+ *   - Text, icons, and controls remain upright and natural in both portrait and landscape.
+ *   - Viewport dimensions and image fitted dimensions dynamically adapt to device orientation,
+ *     eliminating excessive black letterbox padding in landscape.
+ *   - Orientation lock is safely restored when the viewer is closed or unmounted.
+ *
  * Interaction model:
  *   - Tap centre  → chrome slides up (spring animation from below)
  *   - Tap centre again → chrome slides down (dismissed)
@@ -17,16 +25,15 @@
  *   - `onToggleSelect(id)` (for bulk upload selection) calls the gallery's
  *     togglePhotoSelection which updates `photo.selected` and `photo.status`.
  *   - `onToggleFavourite(id)` sets a separate `marked` flag without toggling
- *     `selected`.  (Implemented below by setting status='marked' without
- *     changing selected.)
+ *     `selected`.
  *   - Because the gallery passes its live state down, changes in the viewer
  *     are immediately reflected in the gallery grid badges, and vice-versa.
  *
  * Dock buttons:
- *   Select   – marks/unmarks photo for BULK upload (synced with grid checkbox)
+ *   Select    – marks/unmarks photo for BULK upload (synced with grid checkbox)
  *   Favourite – toggles a "keeper" heart flag (kept as `status='marked'`)
- *   Upload   – uploads THIS single photo immediately
- *   Delete   – deletes file from device (confirmation dialog)
+ *   Upload    – uploads THIS single photo immediately
+ *   Delete    – deletes file from device (confirmation dialog)
  */
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
@@ -38,15 +45,16 @@ import {
   FlatList,
   Modal,
   Alert,
-  Dimensions,
   Animated,
   PanResponder,
   StatusBar,
   Platform,
   UIManager,
   LayoutChangeEvent,
+  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import LottieView from 'lottie-react-native';
 import {
   ArrowLeft,
@@ -120,11 +128,9 @@ const AnimatedUploadIcon = React.memo(
 AnimatedUploadIcon.displayName = 'AnimatedUploadIcon';
 
 // ─────────────────────────────────────────────────────────────────────────────
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
 // Approximate height of the bottom chrome (filmstrip + dock) so we know how
 // far to translate it offscreen when hidden.
-const BOTTOM_CHROME_HEIGHT = 220;
+const BOTTOM_CHROME_HEIGHT = 280;
 
 /** Parses "WIDTHxHEIGHT" (e.g. "4000x3000") from photo metadata */
 function parseDimensions(dimStr?: string): { width: number; height: number } | null {
@@ -192,6 +198,48 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   isUploading = false,
 }) => {
   const insets = useSafeAreaInsets();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+
+  // ── Orientation ────────────────────────────────────────────────────────────
+  const isLandscape = windowWidth > windowHeight;
+  const previousLockRef = useRef<ScreenOrientation.OrientationLock | null>(null);
+
+  // Manage native screen orientation lifecycle: unlock on open, restore on close
+  useEffect(() => {
+    if (!visible) return;
+
+    let isMounted = true;
+
+    async function initOrientation() {
+      try {
+        const lock = await ScreenOrientation.getOrientationLockAsync();
+        if (!isMounted) return;
+        previousLockRef.current = lock;
+
+        await ScreenOrientation.unlockAsync();
+      } catch (err) {
+        console.warn('Failed to configure screen orientation:', err);
+      }
+    }
+
+    initOrientation();
+
+    return () => {
+      isMounted = false;
+      if (previousLockRef.current !== null) {
+        const lockToRestore = previousLockRef.current;
+        ScreenOrientation.lockAsync(lockToRestore).catch(err => {
+          console.warn('Failed to restore screen orientation lock:', err);
+        });
+      }
+    };
+  }, [visible]);
+
+  // Safe area insets adapted for orientation and device camera cutouts
+  const safeTop = isLandscape ? Math.max(insets.top, 8) : Math.max(insets.top, 14);
+  const safeBottom = isLandscape ? Math.max(insets.bottom, 8) : Math.max(insets.bottom, 16);
+  const safeLeft = Math.max(insets.left, 0);
+  const safeRight = Math.max(insets.right, 0);
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
@@ -209,7 +257,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
     }
   }
 
-  // ── Animation values ─────────────────────────────────────────────────────────
   /** Bottom chrome (filmstrip + dock) slides up/down from the bottom edge */
   const bottomSlideY = useMemo(() => new Animated.Value(BOTTOM_CHROME_HEIGHT), []);
   /** Top header fades in/out in sync with the bottom chrome */
@@ -243,9 +290,19 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   const currentPhoto = photos[currentIndex] || photos[0];
 
   // ── Viewport and Image Fitted Dimensions ───────────────────────────────────
-  const [viewportSize, setViewportSize] = useState({ width: SCREEN_WIDTH, height: SCREEN_HEIGHT });
-  const viewportSizeRef = useRef(viewportSize);
+  const [layoutSize, setLayoutSize] = useState<{ width: number; height: number } | null>(null);
+  const [prevLandscape, setPrevLandscape] = useState(isLandscape);
 
+  if (isLandscape !== prevLandscape) {
+    setPrevLandscape(isLandscape);
+    setLayoutSize(null);
+  }
+
+  const viewportSize = useMemo(() => {
+    return layoutSize || { width: windowWidth, height: windowHeight };
+  }, [layoutSize, windowWidth, windowHeight]);
+
+  const viewportSizeRef = useRef(viewportSize);
   useEffect(() => {
     viewportSizeRef.current = viewportSize;
   }, [viewportSize]);
@@ -253,8 +310,10 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   const handleImageLayout = useCallback((e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     if (width > 0 && height > 0) {
-      setViewportSize(prev => {
-        if (Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) return prev;
+      setLayoutSize(prev => {
+        if (prev && Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) {
+          return prev;
+        }
         return { width, height };
       });
     }
@@ -344,6 +403,15 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
       Animated.spring(panY, { toValue: 0, useNativeDriver: true }),
     ]).start();
   }, [scale, panX, panY]);
+
+  // Cleanly reset zoom when phone rotates between landscape and portrait
+  const prevIsLandscapeRef = useRef(isLandscape);
+  useEffect(() => {
+    if (prevIsLandscapeRef.current !== isLandscape) {
+      prevIsLandscapeRef.current = isLandscape;
+      resetZoom();
+    }
+  }, [isLandscape, resetZoom]);
 
   // ── Re-clamp pan when viewport or fitted dimensions change ─────────────────
   useEffect(() => {
@@ -450,9 +518,12 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   }, [currentIndex, photos.length, resetZoom]);
 
   const handleDismiss = useCallback(() => {
+    if (previousLockRef.current !== null) {
+      ScreenOrientation.lockAsync(previousLockRef.current).catch(() => {});
+    }
     Animated.parallel([
       Animated.timing(dismissTranslateY, {
-        toValue: SCREEN_HEIGHT * 0.85,
+        toValue: (viewportSizeRef.current?.height || windowHeight) * 0.85,
         duration: 210,
         useNativeDriver: true,
       }),
@@ -462,7 +533,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         useNativeDriver: true,
       }),
     ]).start(() => onClose());
-  }, [dismissTranslateY, dismissOpacity, onClose]);
+  }, [windowHeight, dismissTranslateY, dismissOpacity, onClose]);
 
   const handleDoubleTap = useCallback(
     (tapX?: number, tapY?: number) => {
@@ -728,7 +799,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         // Swipe-down dismiss feedback (pure 1-finger gesture at 1x)
         if (g.dy > 0 && Math.abs(g.dy) > Math.abs(g.dx)) {
           dismissTranslateY.setValue(g.dy);
-          dismissOpacity.setValue(Math.max(0.3, 1 - g.dy / (SCREEN_HEIGHT * 0.6)));
+          dismissOpacity.setValue(Math.max(0.3, 1 - g.dy / (viewportSizeRef.current.height * 0.6)));
         }
       },
       onPanResponderRelease: (evt, g) => {
@@ -792,10 +863,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           if (now - lastTapRef.current < 280) {
             // Double-tap
             lastTapRef.current = 0;
-            handlersRef.current.handleDoubleTap(
-              evt.nativeEvent.pageX ?? g.x0,
-              evt.nativeEvent.pageY ?? g.y0,
-            );
+            handlersRef.current.handleDoubleTap(evt.nativeEvent.pageX, evt.nativeEvent.pageY);
           } else {
             // Single-tap → toggle chrome
             lastTapRef.current = now;
@@ -883,41 +951,50 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           );
           currentPanX.current = Math.max(-maxPanX, Math.min(currentPanX.current, maxPanX));
           currentPanY.current = Math.max(-maxPanY, Math.min(currentPanY.current, maxPanY));
-          startPanX.current = currentPanX.current;
-          startPanY.current = currentPanY.current;
           basePanX.current = currentPanX.current;
           basePanY.current = currentPanY.current;
-          panX.setValue(currentPanX.current);
-          panY.setValue(currentPanY.current);
+          startPanX.current = currentPanX.current;
+          startPanY.current = currentPanY.current;
+          Animated.parallel([
+            Animated.spring(panX, { toValue: currentPanX.current, useNativeDriver: true }),
+            Animated.spring(panY, { toValue: currentPanY.current, useNativeDriver: true }),
+          ]).start();
         }
       },
     }),
   );
 
-  // ── Early exit ─────────────────────────────────────────────────────────────
-  if (!visible || !currentPhoto) return null;
-
-  const isSelected = currentPhoto.selected;
-  const isFavorite = favoritePhotoIds.has(currentPhoto.id); // bulk-upload queue
-  const isUploaded =
-    currentPhoto.status === 'uploaded' ||
-    (uploadedPhotoIds
-      ? uploadedPhotoIds.has(currentPhoto.id) ||
-        Boolean(currentPhoto.filename && uploadedPhotoIds.has(currentPhoto.filename))
-      : false);
+  const isSelected = currentPhoto?.selected ?? false;
+  const isFavorite = currentPhoto ? favoritePhotoIds.has(currentPhoto.id) : false;
+  const isUploaded = currentPhoto
+    ? currentPhoto.status === 'uploaded' ||
+      (uploadedPhotoIds
+        ? uploadedPhotoIds.has(currentPhoto.id) ||
+          Boolean(currentPhoto.filename && uploadedPhotoIds.has(currentPhoto.filename))
+        : false)
+    : false;
 
   // ── Render ─────────────────────────────────────────────────────────────────
+  if (!visible || !currentPhoto) {
+    return null;
+  }
+
   return (
     <Modal
       visible={visible}
       transparent
       animationType="none"
       statusBarTranslucent
-      onRequestClose={onClose}
+      onRequestClose={() => {
+        if (previousLockRef.current !== null) {
+          ScreenOrientation.lockAsync(previousLockRef.current).catch(() => {});
+        }
+        onClose();
+      }}
     >
       <StatusBar hidden barStyle="light-content" backgroundColor="transparent" translucent />
 
-      {/* Root dismiss container */}
+      {/* Root viewer with dismiss transform */}
       <Animated.View
         style={[
           styles.root,
@@ -935,8 +1012,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
             style={[
               styles.imageTransformWrapper,
               {
-                width: viewportSize.width,
-                height: viewportSize.height,
                 transform: [{ translateX: panX }, { translateY: panY }, { scale }],
               },
             ]}
@@ -970,11 +1045,21 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           pointerEvents={chromeVisible ? 'box-none' : 'none'}
           style={[
             styles.topHeader,
-            { paddingTop: Math.max(insets.top, 14) + 4, opacity: headerOpacity },
+            {
+              paddingTop: safeTop + 4,
+              paddingLeft: safeLeft + 14,
+              paddingRight: safeRight + 14,
+              opacity: headerOpacity,
+            },
           ]}
         >
           <Pressable
-            onPress={onClose}
+            onPress={() => {
+              if (previousLockRef.current !== null) {
+                ScreenOrientation.lockAsync(previousLockRef.current).catch(() => {});
+              }
+              onClose();
+            }}
             hitSlop={12}
             style={({ pressed }) => [
               styles.backBtn,
@@ -1025,7 +1110,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           <TouchableOpacity
             onPress={handlePrevPhoto}
             activeOpacity={0.8}
-            style={[styles.sideBtn, styles.sideBtnLeft]}
+            style={[
+              styles.sideBtn,
+              styles.sideBtnLeft,
+              { left: safeLeft + (isLandscape ? 12 : 14) },
+            ]}
             accessibilityLabel="Previous photo"
           >
             <ChevronLeft size={22} color="#FFFFFF" strokeWidth={2.6} />
@@ -1035,7 +1124,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           <TouchableOpacity
             onPress={handleNextPhoto}
             activeOpacity={0.8}
-            style={[styles.sideBtn, styles.sideBtnRight]}
+            style={[
+              styles.sideBtn,
+              styles.sideBtnRight,
+              { right: safeRight + (isLandscape ? 12 : 14) },
+            ]}
             accessibilityLabel="Next photo"
           >
             <ChevronRight size={22} color="#FFFFFF" strokeWidth={2.6} />
@@ -1051,7 +1144,16 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           style={[styles.bottomChrome, { transform: [{ translateY: bottomSlideY }] }]}
         >
           {/* Filename overlaid above filmstrip strip */}
-          <View style={styles.filenameRow} pointerEvents="none">
+          <View
+            style={[
+              styles.filenameRow,
+              {
+                paddingLeft: safeLeft + 16,
+                paddingRight: safeRight + 16,
+              },
+            ]}
+            pointerEvents="none"
+          >
             <Text style={styles.filenameText} numberOfLines={1}>
               {currentPhoto.filename || `Photo ${currentIndex + 1}`}
             </Text>
@@ -1065,7 +1167,13 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
               data={photos}
               keyExtractor={item => item.id}
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.filmstripContent}
+              contentContainerStyle={[
+                styles.filmstripContent,
+                {
+                  paddingLeft: safeLeft + 14,
+                  paddingRight: safeRight + 14,
+                },
+              ]}
               getItemLayout={(_, idx) => ({ length: 60, offset: 60 * idx, index: idx })}
               renderItem={({ item, index }) => {
                 const active = index === currentIndex;
@@ -1094,7 +1202,16 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
           {/* ── ACTION DOCK ────────────────────────────────────────────────── */}
           {/* Light cream card that slides up from below as one unit with the filmstrip */}
-          <View style={[styles.dockSheet, { paddingBottom: Math.max(insets.bottom, 16) + 4 }]}>
+          <View
+            style={[
+              styles.dockSheet,
+              {
+                paddingBottom: safeBottom + 4,
+                paddingLeft: safeLeft + 16,
+                paddingRight: safeRight + 16,
+              },
+            ]}
+          >
             <View style={styles.dockHandle} />
 
             <View style={styles.dockRow}>
@@ -1143,7 +1260,9 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
                 onPress={() => onUploadPhoto(currentPhoto)}
                 style={({ pressed }) => [
                   styles.dockItem,
-                  { transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }] },
+                  {
+                    transform: [{ translateY: pressed ? 2 : 0 }, { translateX: pressed ? 2 : 0 }],
+                  },
                 ]}
                 accessibilityRole="button"
                 accessibilityLabel={
@@ -1187,6 +1306,8 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#0A0A0C',
+    position: 'relative',
+    overflow: 'hidden',
   },
 
   // ── LAYER 0: Image ──────────────────────────────────────────────────────────
@@ -1201,15 +1322,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#0A0A0C',
   },
   imageTransformWrapper: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    width: '100%',
+    height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
   },
   // resizeMode="contain" kept in JSX so photo never gets cropped
   photo: {
-    width: '100%',
-    height: '100%',
+    backgroundColor: 'transparent',
   },
 
   // ── LAYER 1: Top header ─────────────────────────────────────────────────────
@@ -1220,9 +1340,10 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingBottom: 18,
+    paddingBottom: 16,
     backgroundColor: 'rgba(10, 10, 12, 0.58)',
+    zIndex: 20,
+    elevation: 6,
   },
   backBtn: {
     width: 44,
@@ -1265,27 +1386,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
-  headerQualityPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-    borderWidth: 1.2,
-  },
-  headerQualityTextReview: {
-    fontFamily: FONTS.plusJakartaSans.bold,
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#92400E',
-  },
-  headerQualityTextPass: {
-    fontFamily: FONTS.plusJakartaSans.bold,
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#065F46',
-  },
   counterText: {
     fontFamily: FONTS.syne.bold,
     fontSize: 14,
@@ -1314,9 +1414,11 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.28)',
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 15,
+    elevation: 4,
   },
-  sideBtnLeft: { left: 14 },
-  sideBtnRight: { right: 14 },
+  sideBtnLeft: {},
+  sideBtnRight: {},
 
   // ── LAYER 3: Bottom chrome ──────────────────────────────────────────────────
   bottomChrome: {
@@ -1324,11 +1426,12 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
+    zIndex: 20,
+    elevation: 6,
   },
 
   // Filename
   filenameRow: {
-    paddingHorizontal: 16,
     paddingBottom: 8,
   },
   filenameText: {
@@ -1348,7 +1451,6 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   filmstripContent: {
-    paddingHorizontal: 14,
     gap: 8,
   },
   thumbWrapper: {
@@ -1389,7 +1491,6 @@ const styles = StyleSheet.create({
     borderRightWidth: 2,
     borderColor: '#161616',
     paddingTop: 8,
-    paddingHorizontal: 10,
     ...Platform.select({
       android: { elevation: 10 },
       ios: {
@@ -1406,7 +1507,7 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: '#D4D4D8',
     alignSelf: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
 
   // Dock row — evenly spaces all 4 buttons
