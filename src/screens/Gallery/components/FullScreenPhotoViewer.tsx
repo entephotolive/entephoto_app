@@ -4,13 +4,13 @@
  * Layout:  Full-bleed black background, photo shown at native aspect ratio
  *          (resizeMode="contain"), chrome overlaid as absolute layers.
  *
- * Natural Device Auto-Rotation:
- *   - Device auto-rotation is unlocked while the viewer is visible.
- *   - Follows native Android screen orientation directly without manual canvas rotation.
- *   - Text, icons, and controls remain upright and natural in both portrait and landscape.
- *   - Viewport dimensions and image fitted dimensions dynamically adapt to device orientation,
- *     eliminating excessive black letterbox padding in landscape.
- *   - Orientation lock is safely restored when the viewer is closed or unmounted.
+ * Physical Device Orientation Photo-Only Rotation:
+ *   - Screen orientation remains strictly locked in portrait so UI and overlays never reflow.
+ *   - Physical device orientation (portrait, landscape-left, landscape-right) is detected via expo-sensors DeviceMotion.
+ *   - Stable angle thresholds with hysteresis prevent flicker and ignore uncertain/flat readings.
+ *   - ONLY the main photo image container rotates (0deg in portrait, +90deg / -90deg in landscape).
+ *   - Header, navigation arrows, filename, filmstrip, and bottom dock remain upright and locked in their portrait positions.
+ *   - Fitted visual dimensions and zoom pan bounds adapt dynamically to the rotated bounding box within the locked portrait viewport.
  *
  * Interaction model:
  *   - Tap centre  → chrome slides up (spring animation from below)
@@ -55,6 +55,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import { DeviceMotion } from 'expo-sensors';
 import LottieView from 'lottie-react-native';
 import {
   ArrowLeft,
@@ -130,7 +131,7 @@ AnimatedUploadIcon.displayName = 'AnimatedUploadIcon';
 // ─────────────────────────────────────────────────────────────────────────────
 // Approximate height of the bottom chrome (filmstrip + dock) so we know how
 // far to translate it offscreen when hidden.
-const BOTTOM_CHROME_HEIGHT = 280;
+const BOTTOM_CHROME_HEIGHT = 340;
 
 /** Parses "WIDTHxHEIGHT" (e.g. "4000x3000") from photo metadata */
 function parseDimensions(dimStr?: string): { width: number; height: number } | null {
@@ -160,6 +161,8 @@ function getPanBounds(scaleVal: number, fitW: number, fitH: number, vpW: number,
 
   return { maxPanX, maxPanY };
 }
+
+export type PhysicalOrientation = 'portrait' | 'landscape-left' | 'landscape-right';
 
 // ─────────────────────────────────────────────────────────────────────────────
 export interface FullScreenPhotoViewerProps {
@@ -200,29 +203,28 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
   const insets = useSafeAreaInsets();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
-  // ── Orientation ────────────────────────────────────────────────────────────
-  const isLandscape = windowWidth > windowHeight;
+  // ── Native Screen Orientation (Locked to Portrait) ───────────────────────
   const previousLockRef = useRef<ScreenOrientation.OrientationLock | null>(null);
 
-  // Manage native screen orientation lifecycle: unlock on open, restore on close
   useEffect(() => {
     if (!visible) return;
 
     let isMounted = true;
 
-    async function initOrientation() {
+    async function lockScreenToPortrait() {
       try {
         const lock = await ScreenOrientation.getOrientationLockAsync();
         if (!isMounted) return;
         previousLockRef.current = lock;
 
-        await ScreenOrientation.unlockAsync();
+        // Keep native app screen orientation fixed to portrait
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
       } catch (err) {
-        console.warn('Failed to configure screen orientation:', err);
+        console.warn('Failed to lock screen orientation to portrait:', err);
       }
     }
 
-    initOrientation();
+    lockScreenToPortrait();
 
     return () => {
       isMounted = false;
@@ -235,17 +237,176 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
     };
   }, [visible]);
 
-  // Safe area insets adapted for orientation and device camera cutouts
-  const safeTop = isLandscape ? Math.max(insets.top, 8) : Math.max(insets.top, 14);
-  const safeBottom = isLandscape ? Math.max(insets.bottom, 8) : Math.max(insets.bottom, 16);
+  // ── Physical Device Orientation (expo-sensors DeviceMotion) ────────────────
+  const [physicalOrientation, setPhysicalOrientation] = useState<PhysicalOrientation>('portrait');
+  const currentOriRef = useRef<PhysicalOrientation>('portrait');
+  const candidateOriRef = useRef<PhysicalOrientation | null>(null);
+  const consecutiveCountRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!visible) return;
+
+    let isMounted = true;
+    let subscription: { remove: () => void } | null = null;
+
+    async function initDeviceMotion() {
+      try {
+        const isAvailable = await DeviceMotion.isAvailableAsync();
+        console.log('[DEVICE-MOTION-AVAIL]', isAvailable);
+        if (!isMounted || !isAvailable) {
+          return;
+        }
+
+        // 150ms interval (~6.7 Hz) avoids battery drain and CPU overhead
+        DeviceMotion.setUpdateInterval(150);
+
+        subscription = DeviceMotion.addListener(data => {
+          if (!isMounted) return;
+
+          let candidate: PhysicalOrientation | null = null;
+
+          // Method 1: Accelerometer with gravity vector
+          if (data.accelerationIncludingGravity) {
+            const { x, y, z } = data.accelerationIncludingGravity;
+            const xyMagnitude = Math.hypot(x, y);
+            const zMagnitude = Math.abs(z);
+
+            // If phone is flat (screen facing ceiling or floor), readings in XY are ambiguous.
+            // Ignore uncertain readings and retain the last stable orientation.
+            if (xyMagnitude < 2.5 && zMagnitude > 7.5) {
+              return;
+            }
+
+            // Calculate angle in device XY plane relative to upright portrait (0°):
+            // In Expo, resting upright in portrait produces y ≈ -9.8.
+            // Negating y aligns 0° with upright portrait:
+            // - Upright portrait: x ≈ 0, y ≈ -9.8 -> Math.atan2(0, 9.8) = 0°
+            // - Tilted left (top to left, CCW): x ≈ -9.8, y ≈ 0 -> Math.atan2(-9.8, 0) = -90°
+            // - Tilted right (top to right, CW): x ≈ +9.8, y ≈ 0 -> Math.atan2(9.8, 0) = +90°
+            const angleDeg = Math.atan2(x, -y) * (180 / Math.PI);
+            const current = currentOriRef.current;
+
+            // Stable angle thresholds with hysteresis
+            if (current === 'portrait') {
+              if (angleDeg <= -55 && angleDeg >= -125) {
+                candidate = 'landscape-left';
+              } else if (angleDeg >= 55 && angleDeg <= 125) {
+                candidate = 'landscape-right';
+              } else {
+                candidate = 'portrait';
+              }
+            } else if (current === 'landscape-left') {
+              // Hysteresis: requires returning above -35° or past -145° to leave landscape-left
+              if (angleDeg > -35 || angleDeg < -145) {
+                candidate = 'portrait';
+              } else if (angleDeg >= 55 && angleDeg <= 125) {
+                candidate = 'landscape-right';
+              } else {
+                candidate = 'landscape-left';
+              }
+            } else if (current === 'landscape-right') {
+              // Hysteresis: requires returning below 35° or past 145° to leave landscape-right
+              if (angleDeg < 35 || angleDeg > 145) {
+                candidate = 'portrait';
+              } else if (angleDeg <= -55 && angleDeg >= -125) {
+                candidate = 'landscape-left';
+              } else {
+                candidate = 'landscape-right';
+              }
+            }
+          } else if (typeof data.orientation === 'number') {
+            // Method 2 fallback: DeviceMotion orientation property
+            // Expo specification: LeftLandscape = -90, RightLandscape = 90
+            if (data.orientation === -90) {
+              candidate = 'landscape-left';
+            } else if (data.orientation === 90) {
+              candidate = 'landscape-right';
+            } else if (data.orientation === 0 || data.orientation === 180) {
+              candidate = 'portrait';
+            }
+          }
+
+          if (!candidate) return;
+
+          // Debounce: require 2 consecutive consistent readings (~300ms) before updating React state
+          if (candidate !== currentOriRef.current) {
+            if (candidateOriRef.current === candidate) {
+              consecutiveCountRef.current += 1;
+              if (consecutiveCountRef.current >= 2) {
+                currentOriRef.current = candidate;
+                setPhysicalOrientation(candidate);
+                consecutiveCountRef.current = 0;
+                candidateOriRef.current = null;
+              }
+            } else {
+              candidateOriRef.current = candidate;
+              consecutiveCountRef.current = 1;
+            }
+          } else {
+            candidateOriRef.current = null;
+            consecutiveCountRef.current = 0;
+          }
+        });
+      } catch (err) {
+        console.warn('Physical device motion sensor unavailable:', err);
+      }
+    }
+
+    initDeviceMotion();
+
+    return () => {
+      isMounted = false;
+      if (subscription) {
+        subscription.remove();
+      }
+    };
+  }, [visible]);
+
+  // Smooth rotation animation for the main photo
+  const isPhotoRotated = physicalOrientation !== 'portrait';
+  const rotationAnim = useMemo(() => new Animated.Value(0), []);
+
+  useEffect(() => {
+    let targetAngle = 0;
+    if (physicalOrientation === 'landscape-left') {
+      targetAngle = 90;
+    } else if (physicalOrientation === 'landscape-right') {
+      targetAngle = -90;
+    }
+
+    Animated.spring(rotationAnim, {
+      toValue: targetAngle,
+      tension: 65,
+      friction: 11,
+      useNativeDriver: true,
+    }).start();
+  }, [physicalOrientation, rotationAnim]);
+
+  const rotationInterpolate = useMemo(
+    () =>
+      rotationAnim.interpolate({
+        inputRange: [-90, 0, 90],
+        outputRange: ['-90deg', '0deg', '90deg'],
+      }),
+    [rotationAnim],
+  );
+
+  // Safe area insets fixed to portrait
+  const safeTop = Math.max(insets.top, 14);
+  const safeBottom = Math.max(insets.bottom, 16);
   const safeLeft = Math.max(insets.left, 0);
   const safeRight = Math.max(insets.right, 0);
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [chromeVisible, setChromeVisible] = useState(false); // starts hidden
+  const chromeVisibleRef = useRef(false);
   const [prevVisible, setPrevVisible] = useState(visible);
   const [prevInitialIndex, setPrevInitialIndex] = useState(initialIndex);
+
+  useEffect(() => {
+    chromeVisibleRef.current = chromeVisible;
+  }, [chromeVisible]);
 
   if (visible !== prevVisible || initialIndex !== prevInitialIndex) {
     setPrevVisible(visible);
@@ -254,6 +415,8 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
       const safeIndex = Math.max(0, Math.min(initialIndex, photos.length - 1));
       setCurrentIndex(safeIndex);
       setChromeVisible(false);
+    } else if (physicalOrientation !== 'portrait') {
+      setPhysicalOrientation('portrait');
     }
   }
 
@@ -291,12 +454,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
   // ── Viewport and Image Fitted Dimensions ───────────────────────────────────
   const [layoutSize, setLayoutSize] = useState<{ width: number; height: number } | null>(null);
-  const [prevLandscape, setPrevLandscape] = useState(isLandscape);
-
-  if (isLandscape !== prevLandscape) {
-    setPrevLandscape(isLandscape);
-    setLayoutSize(null);
-  }
 
   const viewportSize = useMemo(() => {
     return layoutSize || { width: windowWidth, height: windowHeight };
@@ -347,38 +504,78 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
   const imageSize = loadedSize || parsedDimensions;
 
-  const fittedDimensions = useMemo(() => {
+  const { fittedDimensions, visualDimensions } = useMemo(() => {
     const vpW = viewportSize.width;
     const vpH = viewportSize.height;
 
     if (!imageSize || imageSize.width <= 0 || imageSize.height <= 0) {
-      return { width: vpW, height: vpH };
+      const w = isPhotoRotated ? vpH : vpW;
+      const h = isPhotoRotated ? vpW : vpH;
+      return {
+        fittedDimensions: { width: Math.round(w), height: Math.round(h) },
+        visualDimensions: {
+          width: Math.round(isPhotoRotated ? h : w),
+          height: Math.round(isPhotoRotated ? w : h),
+        },
+      };
     }
 
     const imgAspect = imageSize.width / imageSize.height;
-    const vpAspect = vpW / vpH;
 
-    let fitW = vpW;
-    let fitH = vpH;
+    if (isPhotoRotated) {
+      // Rotated 90° or -90°:
+      // An image container of size fitW × fitH, when rotated 90°,
+      // has on-screen visual width = fitH, and visual height = fitW.
+      // Its visual aspect ratio is fitH / fitW = 1 / imgAspect.
+      // It must fit within the fixed portrait viewport (vpW, vpH).
+      const visualAspect = 1 / imgAspect;
+      const vpAspect = vpW / vpH;
 
-    if (imgAspect > vpAspect) {
-      // Wider than viewport -> fit horizontally
-      fitW = vpW;
-      fitH = vpW / imgAspect;
+      let fitW: number;
+      let fitH: number;
+
+      if (visualAspect > vpAspect) {
+        // Constrained horizontally by viewport width (visualWidth = vpW)
+        fitH = vpW;
+        fitW = vpW * imgAspect;
+      } else {
+        // Constrained vertically by viewport height (visualHeight = vpH)
+        fitW = vpH;
+        fitH = vpH / imgAspect;
+      }
+
+      return {
+        fittedDimensions: { width: Math.round(fitW), height: Math.round(fitH) },
+        visualDimensions: { width: Math.round(fitH), height: Math.round(fitW) },
+      };
     } else {
-      // Taller than viewport -> fit vertically
-      fitH = vpH;
-      fitW = vpH * imgAspect;
-    }
+      // Normal portrait (0° rotation)
+      const vpAspect = vpW / vpH;
+      let fitW = vpW;
+      let fitH = vpH;
 
-    return { width: fitW, height: fitH };
-  }, [viewportSize, imageSize]);
+      if (imgAspect > vpAspect) {
+        fitW = vpW;
+        fitH = vpW / imgAspect;
+      } else {
+        fitH = vpH;
+        fitW = vpH * imgAspect;
+      }
+
+      return {
+        fittedDimensions: { width: Math.round(fitW), height: Math.round(fitH) },
+        visualDimensions: { width: Math.round(fitW), height: Math.round(fitH) },
+      };
+    }
+  }, [viewportSize, imageSize, isPhotoRotated]);
 
   const fittedDimensionsRef = useRef(fittedDimensions);
+  const visualDimensionsRef = useRef(visualDimensions);
 
   useEffect(() => {
     fittedDimensionsRef.current = fittedDimensions;
-  }, [fittedDimensions]);
+    visualDimensionsRef.current = visualDimensions;
+  }, [fittedDimensions, visualDimensions]);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   const resetZoom = useCallback(() => {
@@ -404,22 +601,22 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
     ]).start();
   }, [scale, panX, panY]);
 
-  // Cleanly reset zoom when phone rotates between landscape and portrait
-  const prevIsLandscapeRef = useRef(isLandscape);
+  // Cleanly reset zoom when phone rotates between orientations
+  const prevOrientationRef = useRef(physicalOrientation);
   useEffect(() => {
-    if (prevIsLandscapeRef.current !== isLandscape) {
-      prevIsLandscapeRef.current = isLandscape;
+    if (prevOrientationRef.current !== physicalOrientation) {
+      prevOrientationRef.current = physicalOrientation;
       resetZoom();
     }
-  }, [isLandscape, resetZoom]);
+  }, [physicalOrientation, resetZoom]);
 
-  // ── Re-clamp pan when viewport or fitted dimensions change ─────────────────
+  // ── Re-clamp pan when viewport or visual dimensions change ─────────────────
   useEffect(() => {
     if (currentScale.current > 1) {
       const { maxPanX, maxPanY } = getPanBounds(
         currentScale.current,
-        fittedDimensions.width,
-        fittedDimensions.height,
+        visualDimensions.width,
+        visualDimensions.height,
         viewportSize.width,
         viewportSize.height,
       );
@@ -436,7 +633,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         panY.setValue(clampedY);
       }
     }
-  }, [viewportSize, fittedDimensions, panX, panY]);
+  }, [viewportSize, visualDimensions, panX, panY]);
 
   // ── Reset animations when viewer opens ─────────────────────────────────────
   useEffect(() => {
@@ -446,6 +643,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
       dismissTranslateY.setValue(0);
       dismissOpacity.setValue(1);
       resetZoom();
+      chromeVisibleRef.current = false;
     }
   }, [visible, bottomSlideY, headerOpacity, dismissTranslateY, dismissOpacity, resetZoom]);
 
@@ -469,8 +667,13 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
   /** Show/hide the chrome with a spring bounce-up from the bottom */
   const toggleChrome = useCallback(() => {
-    if (chromeVisible) {
-      // Slide down & fade header out
+    bottomSlideY.stopAnimation();
+    headerOpacity.stopAnimation();
+
+    if (chromeVisibleRef.current) {
+      chromeVisibleRef.current = false;
+      setChromeVisible(false);
+      // Slide down & fade header and chevrons out
       Animated.parallel([
         Animated.spring(bottomSlideY, {
           toValue: BOTTOM_CHROME_HEIGHT,
@@ -483,10 +686,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
           duration: 180,
           useNativeDriver: true,
         }),
-      ]).start(() => setChromeVisible(false));
+      ]).start();
     } else {
+      chromeVisibleRef.current = true;
       setChromeVisible(true);
-      // Spring-jump up from below & fade header in
+      // Spring-jump up from below & fade header and chevrons in
       Animated.parallel([
         Animated.spring(bottomSlideY, {
           toValue: 0,
@@ -501,7 +705,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         }),
       ]).start();
     }
-  }, [chromeVisible, bottomSlideY, headerOpacity]);
+  }, [bottomSlideY, headerOpacity]);
 
   const handlePrevPhoto = useCallback(() => {
     if (currentIndex > 0) {
@@ -554,8 +758,8 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
 
         const vpW = viewportSizeRef.current.width;
         const vpH = viewportSizeRef.current.height;
-        const fit = fittedDimensionsRef.current;
-        const { maxPanX, maxPanY } = getPanBounds(targetScale, fit.width, fit.height, vpW, vpH);
+        const vis = visualDimensionsRef.current;
+        const { maxPanX, maxPanY } = getPanBounds(targetScale, vis.width, vis.height, vpW, vpH);
 
         let targetPanX = 0;
         let targetPanY = 0;
@@ -750,8 +954,8 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
             let newPanX = fRel1X - (fRel0X - basePanX.current) * scaleRatio;
             let newPanY = fRel1Y - (fRel0Y - basePanY.current) * scaleRatio;
 
-            const fit = fittedDimensionsRef.current;
-            const { maxPanX, maxPanY } = getPanBounds(newScale, fit.width, fit.height, vpW, vpH);
+            const vis = visualDimensionsRef.current;
+            const { maxPanX, maxPanY } = getPanBounds(newScale, vis.width, vis.height, vpW, vpH);
 
             newPanX = Math.max(-maxPanX, Math.min(newPanX, maxPanX));
             newPanY = Math.max(-maxPanY, Math.min(newPanY, maxPanY));
@@ -777,11 +981,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         if (currentScale.current > 1) {
           const vpW = viewportSizeRef.current.width;
           const vpH = viewportSizeRef.current.height;
-          const fit = fittedDimensionsRef.current;
+          const vis = visualDimensionsRef.current;
           const { maxPanX, maxPanY } = getPanBounds(
             currentScale.current,
-            fit.width,
-            fit.height,
+            vis.width,
+            vis.height,
             vpW,
             vpH,
           );
@@ -818,7 +1022,6 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         if (hadMultiTouches) {
           const vpW = viewportSizeRef.current.width;
           const vpH = viewportSizeRef.current.height;
-          const fit = fittedDimensionsRef.current;
 
           if (currentScale.current <= 1.05) {
             // Pinched back down to ~1x -> cleanly spring back to 1.0 and zero pan
@@ -836,10 +1039,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
             ]).start();
           } else {
             // Clamp pan offsets within bounds of current scale
+            const vis = visualDimensionsRef.current;
             const { maxPanX, maxPanY } = getPanBounds(
               currentScale.current,
-              fit.width,
-              fit.height,
+              vis.width,
+              vis.height,
               vpW,
               vpH,
             );
@@ -880,11 +1084,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         if (currentScale.current > 1) {
           const vpW = viewportSizeRef.current.width;
           const vpH = viewportSizeRef.current.height;
-          const fit = fittedDimensionsRef.current;
+          const vis = visualDimensionsRef.current;
           const { maxPanX, maxPanY } = getPanBounds(
             currentScale.current,
-            fit.width,
-            fit.height,
+            vis.width,
+            vis.height,
             vpW,
             vpH,
           );
@@ -941,11 +1145,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         } else {
           const vpW = viewportSizeRef.current.width;
           const vpH = viewportSizeRef.current.height;
-          const fit = fittedDimensionsRef.current;
+          const vis = visualDimensionsRef.current;
           const { maxPanX, maxPanY } = getPanBounds(
             currentScale.current,
-            fit.width,
-            fit.height,
+            vis.width,
+            vis.height,
             vpW,
             vpH,
           );
@@ -1005,7 +1209,7 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         ]}
       >
         {/* ═══════════════════════════════════════════════════════════════════
-            LAYER 0 — Full-bleed black canvas + photo at natural aspect ratio
+            LAYER 0 — Full-bleed black canvas + photo (rotated only in landscape)
         ═══════════════════════════════════════════════════════════════════ */}
         <View style={styles.imageLayer} onLayout={handleImageLayout} {...panResponder.panHandlers}>
           <Animated.View
@@ -1016,25 +1220,35 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
               },
             ]}
           >
-            {/* resizeMode="contain" → photo shown at native aspect ratio,
-                letterboxed with black bars so nothing is cropped */}
-            <Image
-              source={{ uri: currentPhoto.uri }}
+            {/* Dedicated rotation container: rotates ONLY the main photo image based on physical device orientation */}
+            <Animated.View
               style={[
-                styles.photo,
+                styles.photoRotationContainer,
                 {
                   width: fittedDimensions.width,
                   height: fittedDimensions.height,
+                  transform: [{ rotate: rotationInterpolate }],
                 },
               ]}
-              resizeMode="contain"
-              onLoad={evt => {
-                const { width, height } = evt.nativeEvent.source;
-                if (width > 0 && height > 0) {
-                  setLoadedSize({ width, height });
-                }
-              }}
-            />
+            >
+              <Image
+                source={{ uri: currentPhoto.uri }}
+                style={[
+                  styles.photo,
+                  {
+                    width: fittedDimensions.width,
+                    height: fittedDimensions.height,
+                  },
+                ]}
+                resizeMode="contain"
+                onLoad={evt => {
+                  const { width, height } = evt.nativeEvent.source;
+                  if (width > 0 && height > 0) {
+                    setLoadedSize({ width, height });
+                  }
+                }}
+              />
+            </Animated.View>
           </Animated.View>
         </View>
 
@@ -1104,36 +1318,33 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         </Animated.View>
 
         {/* ═══════════════════════════════════════════════════════════════════
-            LAYER 2 — SIDE CHEVRONS (always available for navigation)
+            LAYER 2 — SIDE CHEVRONS (fade in/out in sync with chrome)
         ═══════════════════════════════════════════════════════════════════ */}
-        {currentIndex > 0 && (
-          <TouchableOpacity
-            onPress={handlePrevPhoto}
-            activeOpacity={0.8}
-            style={[
-              styles.sideBtn,
-              styles.sideBtnLeft,
-              { left: safeLeft + (isLandscape ? 12 : 14) },
-            ]}
-            accessibilityLabel="Previous photo"
-          >
-            <ChevronLeft size={22} color="#FFFFFF" strokeWidth={2.6} />
-          </TouchableOpacity>
-        )}
-        {currentIndex < photos.length - 1 && (
-          <TouchableOpacity
-            onPress={handleNextPhoto}
-            activeOpacity={0.8}
-            style={[
-              styles.sideBtn,
-              styles.sideBtnRight,
-              { right: safeRight + (isLandscape ? 12 : 14) },
-            ]}
-            accessibilityLabel="Next photo"
-          >
-            <ChevronRight size={22} color="#FFFFFF" strokeWidth={2.6} />
-          </TouchableOpacity>
-        )}
+        <Animated.View
+          pointerEvents={chromeVisible ? 'box-none' : 'none'}
+          style={[styles.sideChevronsContainer, { opacity: headerOpacity }]}
+        >
+          {currentIndex > 0 && (
+            <TouchableOpacity
+              onPress={handlePrevPhoto}
+              activeOpacity={0.8}
+              style={[styles.sideBtn, styles.sideBtnLeft, { left: safeLeft + 14 }]}
+              accessibilityLabel="Previous photo"
+            >
+              <ChevronLeft size={22} color="#FFFFFF" strokeWidth={2.6} />
+            </TouchableOpacity>
+          )}
+          {currentIndex < photos.length - 1 && (
+            <TouchableOpacity
+              onPress={handleNextPhoto}
+              activeOpacity={0.8}
+              style={[styles.sideBtn, styles.sideBtnRight, { right: safeRight + 14 }]}
+              accessibilityLabel="Next photo"
+            >
+              <ChevronRight size={22} color="#FFFFFF" strokeWidth={2.6} />
+            </TouchableOpacity>
+          )}
+        </Animated.View>
 
         {/* ═══════════════════════════════════════════════════════════════════
             LAYER 3 — BOTTOM CHROME (spring-slides up from below on tap)
@@ -1327,6 +1538,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  photoRotationContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   // resizeMode="contain" kept in JSX so photo never gets cropped
   photo: {
     backgroundColor: 'transparent',
@@ -1403,6 +1618,10 @@ const styles = StyleSheet.create({
   },
 
   // ── LAYER 2: Side nav ───────────────────────────────────────────────────────
+  sideChevronsContainer: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 15,
+  },
   sideBtn: {
     position: 'absolute',
     top: '46%',

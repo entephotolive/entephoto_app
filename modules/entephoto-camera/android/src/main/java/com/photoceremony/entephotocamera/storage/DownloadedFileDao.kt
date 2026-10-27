@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.Flow
 interface DownloadedFileDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insert(file: DownloadedFile)
+    suspend fun insert(file: DownloadedFile): Long
 
     @Query("SELECT EXISTS(SELECT 1 FROM downloaded_files WHERE filename = :filename AND sizeBytes = :sizeBytes)")
     suspend fun isAlreadyDownloaded(filename: String, sizeBytes: Long): Boolean

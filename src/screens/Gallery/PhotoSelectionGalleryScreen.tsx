@@ -15,6 +15,8 @@ import {
   useWindowDimensions,
   StatusBar,
   InteractionManager,
+  Modal,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -972,14 +974,52 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     return buildGallerySections(activeBatches, filteredPhotos);
   }, [activeBatches, filteredPhotos]);
 
-  // Back Navigation
-  const handleBack = useCallback(() => {
+  // Exit Confirmation State & Back Navigation
+  const [isExitModalVisible, setIsExitModalVisible] = useState(false);
+
+  const handleRequestExit = useCallback(() => {
+    setIsExitModalVisible(true);
+  }, []);
+
+  const handleCancelExit = useCallback(() => {
+    setIsExitModalVisible(false);
+  }, []);
+
+  const handleConfirmExit = useCallback(() => {
+    setIsExitModalVisible(false);
     if (navigation.canGoBack()) {
       navigation.goBack();
     } else {
       navigation.navigate('CameraConnected');
     }
   }, [navigation]);
+
+  const handleBack = handleRequestExit;
+
+  // Handle Android hardware back button
+  useEffect(() => {
+    const onHardwareBack = () => {
+      // If full-screen photo viewer is open, let the viewer handle closing itself
+      if (viewerVisible) {
+        return false;
+      }
+      // If gallery actions sheet is open, let the sheet handle closing itself
+      if (isActionsModalVisible) {
+        return false;
+      }
+      // If the exit confirmation dialog is already open, dismiss it (stay in gallery)
+      if (isExitModalVisible) {
+        setIsExitModalVisible(false);
+        return true;
+      }
+      // Otherwise, show the confirmation dialog
+      setIsExitModalVisible(true);
+      return true;
+    };
+
+    const backSubscription = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => backSubscription.remove();
+  }, [viewerVisible, isActionsModalVisible, isExitModalVisible]);
 
   const toggleFavoritePhoto = useCallback((id: string) => {
     setFavoritePhotoIds(prev => {
@@ -2757,6 +2797,112 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onPauseAllUpload={pauseAllUpload}
           onResumeAllUpload={resumeAllUpload}
         />
+
+        {/* ── 7. THEMED EXIT CONFIRMATION DIALOG ── */}
+        <Modal
+          visible={isExitModalVisible}
+          transparent
+          animationType="fade"
+          statusBarTranslucent
+          onRequestClose={handleCancelExit}
+        >
+          <View style={styles.exitModalBackdrop}>
+            <Pressable
+              style={styles.exitModalBackdropTouch}
+              onPress={handleCancelExit}
+              accessibilityLabel="Dismiss confirmation dialog"
+            />
+            <View
+              style={[
+                styles.exitModalCard,
+                {
+                  backgroundColor: isDark ? '#1C1C22' : '#FFFDF9',
+                  borderColor: isDark ? '#2E2E38' : '#E8DFD4',
+                },
+              ]}
+              accessibilityRole="alert"
+              accessibilityLabel="Leave Gallery confirmation"
+            >
+              {/* Icon Container */}
+              <View
+                style={[
+                  styles.exitModalIconCircle,
+                  {
+                    backgroundColor: isDark ? 'rgba(255, 94, 58, 0.16)' : '#FFF0EB',
+                    borderColor: isDark ? 'rgba(255, 94, 58, 0.32)' : '#FFE2D8',
+                  },
+                ]}
+              >
+                <AlertTriangle size={24} color="#FF5E3A" strokeWidth={2.4} />
+              </View>
+
+              {/* Title */}
+              <Text
+                style={[
+                  styles.exitModalTitle,
+                  {
+                    color: isDark ? '#F4F4F5' : '#161616',
+                  },
+                ]}
+              >
+                Leave Gallery?
+              </Text>
+
+              {/* Message */}
+              <Text
+                style={[
+                  styles.exitModalMessage,
+                  {
+                    color: isDark ? '#D4D4D8' : '#52525B',
+                  },
+                ]}
+              >
+                Your photos may take a little time to load when you return to the Gallery. Are you
+                sure you want to leave now?
+              </Text>
+
+              {/* Action Buttons */}
+              <View style={styles.exitModalButtonContainer}>
+                {/* Primary Button: Leave Gallery */}
+                <TouchableOpacity
+                  activeOpacity={0.82}
+                  onPress={handleConfirmExit}
+                  style={styles.exitModalPrimaryButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Leave Gallery"
+                >
+                  <Text style={styles.exitModalPrimaryButtonText}>Leave Gallery</Text>
+                </TouchableOpacity>
+
+                {/* Secondary Button: Stay in Gallery */}
+                <TouchableOpacity
+                  activeOpacity={0.78}
+                  onPress={handleCancelExit}
+                  style={[
+                    styles.exitModalSecondaryButton,
+                    {
+                      backgroundColor: isDark ? '#26262E' : '#F1E9DF',
+                      borderColor: isDark ? '#383842' : '#DFCFC2',
+                    },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Stay in Gallery"
+                >
+                  <Text
+                    style={[
+                      styles.exitModalSecondaryButtonText,
+                      {
+                        color: isDark ? '#F4F4F5' : '#161616',
+                      },
+                    ]}
+                  >
+                    Stay in Gallery
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </AppBackground>
   );
@@ -4258,5 +4404,107 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+
+  // Exit Confirmation Modal Styles
+  exitModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  exitModalBackdropTouch: {
+    ...StyleSheet.absoluteFill,
+  },
+  exitModalCard: {
+    width: '100%',
+    maxWidth: 380,
+    borderRadius: 28,
+    borderWidth: 1.5,
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 22,
+    alignItems: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.28,
+        shadowRadius: 20,
+      },
+      android: {
+        elevation: 12,
+      },
+    }),
+  },
+  exitModalIconCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  exitModalTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 20,
+    fontWeight: '800',
+    textAlign: 'center',
+    letterSpacing: -0.3,
+    marginBottom: 10,
+  },
+  exitModalMessage: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: 'center',
+    marginBottom: 24,
+    paddingHorizontal: 6,
+  },
+  exitModalButtonContainer: {
+    width: '100%',
+    gap: 10,
+  },
+  exitModalPrimaryButton: {
+    width: '100%',
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FF5E3A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#FF5E3A',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.35,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 4,
+      },
+    }),
+  },
+  exitModalPrimaryButtonText: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: -0.2,
+  },
+  exitModalSecondaryButton: {
+    width: '100%',
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 1.2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  exitModalSecondaryButtonText: {
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: -0.1,
   },
 });

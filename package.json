@@ -24,6 +24,7 @@
     "expo-media-library": "~57.0.5",
     "expo-screen-orientation": "~57.0.3",
     "expo-secure-store": "~57.0.4",
+    "expo-sensors": "~57.0.3",
     "expo-splash-screen": "~57.0.9",
     "expo-updates": "~57.0.22",
     "expo-web-browser": "~57.0.3",
