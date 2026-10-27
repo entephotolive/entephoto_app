@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, StyleSheet } from 'react-native';
+import { View, StyleSheet, Image } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
@@ -74,6 +74,10 @@ export const AppRoot: React.FC = () => {
 
   const isReady = (fontsLoaded || fontError) && initialTheme !== null;
 
+  const onLayoutSplash = useCallback(async () => {
+    await SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   const onLayoutRootView = useCallback(async () => {
     if (isReady) {
       await SplashScreen.hideAsync().catch(() => {});
@@ -81,7 +85,16 @@ export const AppRoot: React.FC = () => {
   }, [isReady]);
 
   if (!isReady) {
-    return null;
+    return (
+      <View style={styles.splashContainer} onLayout={onLayoutSplash}>
+        <Image
+          source={require('../../assets/LOGO_W.png')}
+          style={styles.splashLogo}
+          resizeMode="contain"
+          accessibilityLabel="EntePhoto logo"
+        />
+      </View>
+    );
   }
 
   return (
@@ -100,5 +113,17 @@ export const AppRoot: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  splashContainer: {
+    flex: 1,
+    backgroundColor: '#0B0F1A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  splashLogo: {
+    width: '75%',
+    maxWidth: 320,
+    aspectRatio: 1,
   },
 });
