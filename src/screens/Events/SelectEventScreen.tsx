@@ -11,6 +11,7 @@ import {
   Pressable,
   ActivityIndicator,
   Modal,
+  ScrollView,
   Alert,
   Linking,
   InteractionManager,
@@ -32,7 +33,12 @@ import {
   Shield,
   AlertCircle,
   Globe,
+  MoreVertical,
+  QrCode,
+  Download,
 } from 'lucide-react-native';
+import { QRCodeView } from '@/components/QRCodeView';
+import { tryGenerateEventLiveQrUrl } from '@/utils/eventQr';
 import { useNavigation } from '@react-navigation/native';
 import { AppNavigationProp } from '@/navigation/types';
 import { Text } from '@/components/Text';
@@ -136,6 +142,51 @@ export const SelectEventScreen: React.FC = () => {
   const [isProfileModalVisible, setIsProfileModalVisible] = useState(false);
   const [isMobileWarningModalVisible, setIsMobileWarningModalVisible] = useState(false);
 
+  // ── 3-Dot Menu & QR Code Modal State ──────────────────────────────────────
+  const [selectedMenuEvent, setSelectedMenuEvent] = useState<EventModel | null>(null);
+  const [isMenuVisible, setIsMenuVisible] = useState(false);
+  const [selectedQrEvent, setSelectedQrEvent] = useState<EventModel | null>(null);
+  const [isQrModalVisible, setIsQrModalVisible] = useState(false);
+  const isMenuActionRef = useRef(false);
+
+  const handleOpenEventMenu = useCallback((event: EventModel) => {
+    isMenuActionRef.current = true;
+    setSelectedMenuEvent(event);
+    setIsMenuVisible(true);
+    setTimeout(() => {
+      isMenuActionRef.current = false;
+    }, 400);
+  }, []);
+
+  const handleCloseMenu = useCallback(() => {
+    setIsMenuVisible(false);
+  }, []);
+
+  const handleShowQrCode = useCallback(() => {
+    if (!selectedMenuEvent) return;
+    const targetEvent = selectedMenuEvent;
+    setIsMenuVisible(false);
+    setSelectedQrEvent(targetEvent);
+    setIsQrModalVisible(true);
+  }, [selectedMenuEvent]);
+
+  const handleCloseQrModal = useCallback(() => {
+    setIsQrModalVisible(false);
+  }, []);
+
+  const handleDownloadQrCode = useCallback(() => {
+    // QR code downloading will be implemented in Step 3
+    Alert.alert('Download QR Code', 'QR code download feature will be available in the next step.');
+  }, []);
+
+  // Compute QR URL dynamically from the selected QR event using Step 1 utility
+  const qrUrlResult = useMemo(() => {
+    if (!selectedQrEvent) {
+      return { success: false, error: 'No event selected' };
+    }
+    return tryGenerateEventLiveQrUrl(selectedQrEvent);
+  }, [selectedQrEvent]);
+
   // ── Permission Notice State & Folder Initialization (Trigger #1) ───────────
   const [permissionNotice, setPermissionNotice] = useState<{
     visible: boolean;
@@ -225,7 +276,7 @@ export const SelectEventScreen: React.FC = () => {
 
   const handleCardPress = useCallback(
     async (event: EventModel) => {
-      if (isNavigatingRef.current) return;
+      if (isNavigatingRef.current || isMenuActionRef.current) return;
 
       if (!event.mobile) {
         setSelectedEventId(event._id.$oid);
@@ -387,7 +438,7 @@ export const SelectEventScreen: React.FC = () => {
 
             {/* Event Details — vertically centered beside thumbnail */}
             <View style={styles.eventInfo}>
-              <View style={styles.titleBlock}>
+              <View style={[styles.titleBlock, styles.eventTitleBlockWithMenu]}>
                 <Text
                   style={[
                     styles.eventTitle,
@@ -452,11 +503,31 @@ export const SelectEventScreen: React.FC = () => {
                 )}
               </View>
             </View>
+
+            {/* Three-Dot Menu Button */}
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={e => {
+                e.stopPropagation?.();
+                handleOpenEventMenu(item);
+              }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              style={[
+                styles.cardMenuBtn,
+                {
+                  backgroundColor: isDark ? '#26262E' : '#E8DFD4',
+                },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={`Options for ${item.title}`}
+            >
+              <MoreVertical size={16} color={isDark ? '#A1A1AA' : '#6B6560'} strokeWidth={2.2} />
+            </TouchableOpacity>
           </View>
         </Pressable>
       );
     },
-    [isDark, handleCardPress],
+    [isDark, handleCardPress, handleOpenEventMenu],
   );
 
   return (
@@ -943,6 +1014,215 @@ export const SelectEventScreen: React.FC = () => {
             >
               <Text style={styles.warningModalBtnText}>Got It</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── EVENT CARD OPTIONS POPUP (3-DOT MENU) ── */}
+      <Modal
+        visible={isMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={handleCloseMenu}
+      >
+        <View style={styles.popupBackdrop}>
+          <Pressable style={styles.popupBackdropTouch} onPress={handleCloseMenu} />
+          <View
+            style={[
+              styles.popupCard,
+              {
+                backgroundColor: isDark ? '#1E1E24' : '#FAF6F0',
+                borderColor: isDark ? '#2E2E36' : '#DDD3C3',
+              },
+            ]}
+          >
+            {/* Header displaying event name */}
+            <View style={styles.popupHeader}>
+              <Text
+                style={[styles.popupEventName, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {selectedMenuEvent?.title}
+              </Text>
+            </View>
+            <View
+              style={[styles.popupDivider, { backgroundColor: isDark ? '#2E2E36' : '#E8DFD4' }]}
+            />
+
+            {/* Exactly ONE option: Show QR Code */}
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={handleShowQrCode}
+              style={[styles.popupActionRow, { backgroundColor: isDark ? '#26262E' : '#F2ECE2' }]}
+              accessibilityRole="button"
+              accessibilityLabel="Show QR Code"
+            >
+              <View
+                style={[
+                  styles.popupIconCircle,
+                  { backgroundColor: isDark ? '#32323A' : '#E5DDD0' },
+                ]}
+              >
+                <QrCode size={18} color="#FF6B4A" strokeWidth={2.2} />
+              </View>
+              <Text style={[styles.popupActionLabel, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                Show QR Code
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── EVENT QR CODE MODAL / BOTTOM SHEET ── */}
+      <Modal
+        visible={isQrModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={handleCloseQrModal}
+      >
+        <View style={styles.modalBackdrop}>
+          <Pressable style={styles.modalBackdropTouch} onPress={handleCloseQrModal} />
+          <View
+            style={[
+              styles.modalSheet,
+              {
+                backgroundColor: isDark ? '#18181B' : '#FAF6F0',
+                borderColor: isDark ? '#2E2E36' : '#E8DFD4',
+              },
+            ]}
+          >
+            {/* Modal Header Handle & Close Button */}
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHandle} />
+              <TouchableOpacity
+                onPress={handleCloseQrModal}
+                accessibilityRole="button"
+                accessibilityLabel="Close QR Code dialog"
+                style={[styles.modalCloseBtn, { backgroundColor: isDark ? '#26262E' : '#F1E9DF' }]}
+              >
+                <X size={16} color={isDark ? '#A1A1AA' : '#7A7571'} strokeWidth={2.4} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              bounces={false}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.qrScrollContent}
+            >
+              {/* Heading & Subtitle */}
+              <View style={styles.qrHeaderBlock}>
+                <View style={styles.qrTitleRow}>
+                  <Text style={[styles.qrModalTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Event QR Code
+                  </Text>
+                  {/* Subtle teal accent tag */}
+                  <View
+                    style={[
+                      styles.qrTealBadge,
+                      {
+                        backgroundColor: isDark
+                          ? 'rgba(69, 223, 164, 0.15)'
+                          : 'rgba(27, 184, 122, 0.12)',
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[styles.qrTealBadgeText, { color: isDark ? '#45DFA4' : '#1BB87A' }]}
+                    >
+                      LIVE
+                    </Text>
+                  </View>
+                </View>
+                <Text style={[styles.qrModalSubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Scan this QR code to upload photos to this event.
+                </Text>
+              </View>
+
+              {/* Event Context Card (Name and Date) */}
+              <View
+                style={[
+                  styles.qrEventContextCard,
+                  {
+                    backgroundColor: isDark ? '#222228' : '#F2ECE2',
+                    borderColor: isDark ? '#2E2E36' : '#DDD3C3',
+                  },
+                ]}
+              >
+                <Text
+                  style={[styles.qrEventName, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
+                  {selectedQrEvent?.title || 'Event'}
+                </Text>
+                <View style={styles.qrEventMetaRow}>
+                  <Calendar size={13} color={isDark ? '#A1A1AA' : '#7A7571'} strokeWidth={2} />
+                  <Text style={[styles.qrEventDate, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                    {selectedQrEvent?.date?.$date
+                      ? formatEventDate(selectedQrEvent.date.$date)
+                      : 'Upcoming'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* QR Code Scannable Surface */}
+              <View style={styles.qrCodeWrapper}>
+                <View
+                  style={[
+                    styles.qrCodeClaySurface,
+                    {
+                      backgroundColor: '#FFFFFF',
+                      borderColor: isDark ? '#3F3F46' : '#E8DFD4',
+                    },
+                  ]}
+                >
+                  {qrUrlResult.success && qrUrlResult.url ? (
+                    <QRCodeView
+                      value={qrUrlResult.url}
+                      size={200}
+                      quietZone={4}
+                      color="#000000"
+                      backgroundColor="#FFFFFF"
+                    />
+                  ) : (
+                    <View style={styles.qrErrorState}>
+                      <AlertCircle size={32} color="#EF4444" strokeWidth={2} />
+                      <Text
+                        style={[styles.qrErrorTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                      >
+                        Unable to generate QR
+                      </Text>
+                      <Text
+                        style={[
+                          styles.qrErrorDescription,
+                          { color: isDark ? '#A1A1AA' : '#7A7571' },
+                        ]}
+                      >
+                        {qrUrlResult.error || 'Invalid event or configuration'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Download QR Code Button (Prominent tactile button) */}
+              <TouchableOpacity
+                activeOpacity={0.82}
+                onPress={handleDownloadQrCode}
+                style={[
+                  styles.downloadQrBtn,
+                  {
+                    backgroundColor: isDark ? '#FF6B4A' : '#161616',
+                  },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Download QR Code"
+              >
+                <Download size={19} color="#FFFFFF" strokeWidth={2.4} />
+                <Text style={styles.downloadQrBtnText}>Download QR Code</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1545,5 +1825,196 @@ const styles = StyleSheet.create({
   },
   permissionDismissBtn: {
     padding: 4,
+  },
+
+  // Card Three-Dot Menu Button
+  cardMenuBtn: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  eventTitleBlockWithMenu: {
+    paddingRight: 26,
+  },
+
+  // ── 3-Dot Menu Popup Styles ──
+  popupBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+  },
+  popupBackdropTouch: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  popupCard: {
+    width: '100%',
+    maxWidth: 300,
+    borderRadius: 20,
+    borderWidth: 1.2,
+    padding: 16,
+    shadowColor: '#2D2218',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+    elevation: 8,
+    zIndex: 20,
+  },
+  popupHeader: {
+    paddingHorizontal: 4,
+    paddingBottom: 4,
+  },
+  popupEventName: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    lineHeight: 19,
+  },
+  popupDivider: {
+    height: 1,
+    marginVertical: 10,
+  },
+  popupActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    gap: 12,
+  },
+  popupIconCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  popupActionLabel: {
+    fontFamily: FONTS.plusJakartaSans.semiBold,
+    fontSize: 14,
+  },
+
+  // ── QR Code Modal Styles ──
+  qrScrollContent: {
+    paddingBottom: 8,
+  },
+  qrHeaderBlock: {
+    marginBottom: 14,
+  },
+  qrTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  qrModalTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 20,
+    lineHeight: 24,
+    letterSpacing: -0.3,
+  },
+  qrTealBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  qrTealBadgeText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 10,
+    letterSpacing: 0.6,
+  },
+  qrModalSubtitle: {
+    fontFamily: FONTS.plusJakartaSans.regular,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  qrEventContextCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 16,
+    gap: 4,
+  },
+  qrEventName: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    lineHeight: 19,
+  },
+  qrEventMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  qrEventDate: {
+    fontFamily: FONTS.plusJakartaSans.regular,
+    fontSize: 12,
+  },
+  qrCodeWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
+  },
+  qrCodeClaySurface: {
+    padding: 16,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    shadowColor: '#2D2218',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 14,
+    elevation: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 232,
+    minHeight: 232,
+  },
+  qrErrorState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    gap: 6,
+    maxWidth: 200,
+  },
+  qrErrorTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  qrErrorDescription: {
+    fontFamily: FONTS.plusJakartaSans.regular,
+    fontSize: 11,
+    textAlign: 'center',
+    lineHeight: 15,
+  },
+  downloadQrBtn: {
+    height: 52,
+    borderRadius: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    shadowColor: '#2D2218',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 3,
+    marginBottom: 4,
+  },
+  downloadQrBtnText: {
+    color: '#FFFFFF',
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 15,
+    letterSpacing: 0.2,
   },
 });
