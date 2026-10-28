@@ -11,6 +11,7 @@ import {
   addDeviceDisconnectedListener,
 } from 'entephoto-camera';
 import type { ConnectionState } from 'entephoto-camera';
+import { notificationService } from './notifications/notificationService';
 
 export type GalleryCameraState =
   | 'searching'
@@ -111,6 +112,7 @@ function handleDiscoveryTimeout() {
   );
   // Record not_found outcome separately from native connection state
   setDiscoveryOutcome('not_found');
+  notificationService.dismissCamera();
 
   try {
     nativeStopSearch();
@@ -129,6 +131,24 @@ function startDiscoveryTimer() {
   }, DISCOVERY_TIMEOUT_MS);
 }
 
+function syncNotificationForState(state: GalleryCameraState, model: string | null) {
+  switch (state) {
+    case 'searching':
+      notificationService.showCameraSearching();
+      break;
+    case 'connected':
+      notificationService.showCameraConnected(model);
+      break;
+    case 'disconnected':
+    case 'permission_required':
+      notificationService.dismissCamera();
+      break;
+    default:
+      // connecting / reconnecting: preserve ongoing notification state
+      break;
+  }
+}
+
 function updateState(newState: GalleryCameraState, newModel?: string | null) {
   let changed = false;
   if (store.state !== newState) {
@@ -140,6 +160,7 @@ function updateState(newState: GalleryCameraState, newModel?: string | null) {
     changed = true;
   }
   if (changed) {
+    syncNotificationForState(store.state, store.model);
     notifyListeners();
   }
 }
@@ -292,6 +313,9 @@ function startSearch(forceRestart: boolean = false): void {
   updateState('searching');
   startDiscoveryTimer();
 
+  // Prompt for notification permission on Android 13+ at user interaction point
+  notificationService.ensurePermission().catch(() => {});
+
   try {
     nativeStartSearch();
     const postSearch = safeGetNativeState();
@@ -320,6 +344,7 @@ function stopSearch(): void {
   if (store.discoveryOutcome === 'searching') {
     setDiscoveryOutcome('idle');
   }
+  notificationService.dismissCamera();
   try {
     nativeStopSearch();
     const current = safeGetNativeState();
@@ -333,6 +358,7 @@ function disconnectCamera(): void {
   ensureInitialized();
   clearDiscoveryTimer();
   setDiscoveryOutcome('idle');
+  notificationService.dismissCamera();
   try {
     updateState('disconnected', null);
     nativeDisconnect();

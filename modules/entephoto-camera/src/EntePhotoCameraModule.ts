@@ -135,6 +135,21 @@ declare class EntePhotoCameraModule extends NativeModule<CameraEvents> {
    * Use this to power a "Copy / Share Log" button in the diagnostic console.
    */
   getDiagnosticText(): string;
+
+  // ── Notification methods ──────────────────────────────────────────────────
+  hasNotificationPermission(): boolean;
+  showCameraSearching(): void;
+  showCameraConnected(cameraName?: string | null): void;
+  dismissCamera(): void;
+  dismissCameraNotification(): void;
+  startUploadService(current: number, total: number, percentage?: number | null): void;
+  updateUploadProgress(current: number, total: number, percentage?: number | null): void;
+  stopUploadService(): void;
+  showUploadComplete(count: number): void;
+  showUploadCancelled(uploadedCount: number, total: number): void;
+  showUploadFailed(message: string, successCount: number, total: number): void;
+  dismissUpload(): void;
+  dismissUploadNotification(): void;
 }
 
 export default requireNativeModule<EntePhotoCameraModule>('EntePhotoCamera');

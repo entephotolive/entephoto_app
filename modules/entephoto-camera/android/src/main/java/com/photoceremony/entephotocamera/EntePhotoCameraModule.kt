@@ -3,6 +3,8 @@ package com.photoceremony.entephotocamera
 import com.photoceremony.entephotocamera.core.CameraManager
 import com.photoceremony.entephotocamera.diagnostics.CameraDiagnosticLogger
 import com.photoceremony.entephotocamera.diagnostics.DiagnosticRecord
+import com.photoceremony.entephotocamera.notifications.NotificationHelper
+import com.photoceremony.entephotocamera.notifications.UploadForegroundService
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -195,6 +197,101 @@ class EntePhotoCameraModule : Module() {
          */
         Function("getDiagnosticText") {
             CameraDiagnosticLogger.dumpText()
+        }
+
+        // ── Notification bridge ───────────────────────────────────────────────
+
+        Function("hasNotificationPermission") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.hasNotificationPermission(ctx)
+            } else {
+                false
+            }
+        }
+
+        Function("showCameraSearching") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.showCameraSearching(ctx)
+            }
+        }
+
+        Function("showCameraConnected") { cameraName: String? ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.showCameraConnected(ctx, cameraName)
+            }
+        }
+
+        Function("dismissCamera") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.dismissCamera(ctx)
+            }
+        }
+
+        Function("dismissCameraNotification") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.dismissCamera(ctx)
+            }
+        }
+
+        Function("startUploadService") { current: Int, total: Int, percentage: Double? ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                UploadForegroundService.start(ctx, current, total, percentage)
+            }
+        }
+
+        Function("updateUploadProgress") { current: Int, total: Int, percentage: Double? ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                UploadForegroundService.update(ctx, current, total, percentage)
+            }
+        }
+
+        Function("stopUploadService") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                UploadForegroundService.stop(ctx)
+            }
+        }
+
+        Function("showUploadComplete") { count: Int ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.showUploadComplete(ctx, count)
+            }
+        }
+
+        Function("showUploadCancelled") { uploadedCount: Int, total: Int ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.showUploadCancelled(ctx, uploadedCount, total)
+            }
+        }
+
+        Function("showUploadFailed") { message: String, successCount: Int, total: Int ->
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.showUploadFailed(ctx, message, successCount, total)
+            }
+        }
+
+        Function("dismissUpload") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.dismissUpload(ctx)
+            }
+        }
+
+        Function("dismissUploadNotification") {
+            val ctx = appContext.reactContext
+            if (ctx != null) {
+                NotificationHelper.dismissUpload(ctx)
+            }
         }
     }
 

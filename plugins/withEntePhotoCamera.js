@@ -1,20 +1,15 @@
 /**
  * withEntePhotoCamera.js
  *
- * Expo Config Plugin for EntePhoto USB Camera integration.
+ * Expo Config Plugin for EntePhoto USB Camera & Notification integration.
  *
- * This plugin applies only the minimum native Android configuration required
- * for USB camera discovery:
- *   1. android.hardware.usb.host feature declaration
- *   2. USB_DEVICE_ATTACHED intent filter on the main activity
- *   3. usb_device_filter.xml resource (Sony VID-restricted)
- *
- * What this plugin does NOT do:
- *   - Does not add foreground service permissions
- *   - Does not add storage permissions
- *   - Does not export any service or receiver
- *   - Does not modify application behavior
- *   - Does not add any API credentials or secrets
+ * This plugin applies the native Android configuration required for:
+ *   1. USB camera discovery (android.hardware.usb.host feature, intent filter, Sony filter XML)
+ *   2. Notification and Foreground Service support:
+ *      - android.permission.POST_NOTIFICATIONS
+ *      - android.permission.FOREGROUND_SERVICE
+ *      - android.permission.FOREGROUND_SERVICE_DATA_SYNC
+ *      - UploadForegroundService declaration with dataSync foreground service type
  */
 
 const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
@@ -92,7 +87,66 @@ function withUsbManifest(config) {
   });
 }
 
-// ─── Part B: Write device filter XML into the app's res/xml ─────────────────
+// ─── Part B: Inject Notification and Foreground Service manifest entries ────
+
+const NOTIFICATION_PERMISSIONS = [
+  'android.permission.POST_NOTIFICATIONS',
+  'android.permission.FOREGROUND_SERVICE',
+  'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+];
+
+const FOREGROUND_SERVICE_NAME =
+  'com.photoceremony.entephotocamera.notifications.UploadForegroundService';
+
+function withNotificationManifest(config) {
+  return withAndroidManifest(config, config => {
+    const manifest = config.modResults;
+    const application = manifest.manifest.application?.[0];
+    if (!application) throw new Error('[withEntePhotoCamera] No <application> found in manifest');
+
+    // 1. Ensure notification and foreground service permissions are declared
+    if (!manifest.manifest['uses-permission']) {
+      manifest.manifest['uses-permission'] = [];
+    }
+    const currentPermissions = manifest.manifest['uses-permission'];
+    for (const perm of NOTIFICATION_PERMISSIONS) {
+      const hasPerm = currentPermissions.some(p => p.$?.['android:name'] === perm);
+      if (!hasPerm) {
+        currentPermissions.push({
+          $: {
+            'android:name': perm,
+          },
+        });
+      }
+    }
+
+    // 2. Ensure UploadForegroundService is declared with foregroundServiceType="dataSync"
+    if (!application.service) {
+      application.service = [];
+    }
+    const currentServices = application.service;
+    const existingService = currentServices.find(
+      s => s.$?.['android:name'] === FOREGROUND_SERVICE_NAME,
+    );
+    if (!existingService) {
+      currentServices.push({
+        $: {
+          'android:name': FOREGROUND_SERVICE_NAME,
+          'android:exported': 'false',
+          'android:foregroundServiceType': 'dataSync',
+        },
+      });
+    } else {
+      existingService.$ = existingService.$ || {};
+      existingService.$['android:exported'] = 'false';
+      existingService.$['android:foregroundServiceType'] = 'dataSync';
+    }
+
+    return config;
+  });
+}
+
+// ─── Part C: Write device filter XML into the app's res/xml ─────────────────
 
 const USB_DEVICE_FILTER_XML = `<?xml version="1.0" encoding="utf-8"?>
 <!--
@@ -163,6 +217,7 @@ function withUsbDeviceFilter(config) {
  */
 const withEntePhotoCamera = config => {
   config = withUsbManifest(config);
+  config = withNotificationManifest(config);
   config = withUsbDeviceFilter(config);
   return config;
 };

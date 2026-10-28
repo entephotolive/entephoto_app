@@ -58,6 +58,7 @@ import {
   checkExistingPhotos,
 } from '@/services/photoUploadService';
 import { storageService } from '@/services/storageService';
+import { notificationService } from '@/services/notifications/notificationService';
 import { FullScreenPhotoViewer } from './components/FullScreenPhotoViewer';
 import { GalleryActionsSheet } from './components/GalleryActionsSheet';
 import { ClaymorphismLoader } from './components/ClaymorphismLoader';
@@ -514,6 +515,8 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   const isBatchStopRequestedRef = React.useRef(false);
   const [isBatchStopRequested, setIsBatchStopRequested] = useState(false);
   const currentBatchPipelineRef = React.useRef<UploadLookaheadPipeline | null>(null);
+  const currentBatchControlRef = React.useRef<UploadCancellationControl | null>(null);
+  const isExitingGalleryRef = React.useRef(false);
 
   // Dedicated cleanup effect for All Upload session on unmount
   useEffect(() => {
@@ -534,11 +537,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         currentBatchPipelineRef.current.cleanup();
         currentBatchPipelineRef.current = null;
       }
+      if (currentBatchControlRef.current) {
+        currentBatchControlRef.current.cancel();
+        currentBatchControlRef.current = null;
+      }
       allUploadQueueRef.current = [];
       allUploadSessionProcessedRef.current = 0;
       failedIds.clear();
       isAllUploadWorkerRunningRef.current = false;
       currentUploadingPhotoIdRef.current = null;
+      notificationService.stopUploadProgress();
     };
   }, []);
 
@@ -975,24 +983,164 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   }, [activeBatches, filteredPhotos]);
 
   // Exit Confirmation State & Back Navigation
+  type ExitUploadState = 'actively_uploading' | 'paused_with_pending' | 'none';
   const [isExitModalVisible, setIsExitModalVisible] = useState(false);
+  const [exitUploadState, setExitUploadState] = useState<ExitUploadState>('none');
+  const isLeavingRef = React.useRef(false);
+
+  const determineUploadState = useCallback((): ExitUploadState => {
+    // 1. Actively uploading:
+    // Selected-photo upload in progress or All Upload actively transferring
+    const isActivelyUploading =
+      !isAllUploadPausedRef.current &&
+      (isUploadingRef.current ||
+        isAllUploadWorkerRunningRef.current ||
+        (isAllUploadActiveRef.current &&
+          (allUploadQueueRef.current.length > 0 || currentUploadingPhotoIdRef.current !== null)));
+
+    if (isActivelyUploading) {
+      return 'actively_uploading';
+    }
+
+    // 2. Paused with pending photos:
+    const pendingPhotosCount =
+      allUploadQueueRef.current.length + (currentUploadingPhotoIdRef.current ? 1 : 0);
+    if (isAllUploadActiveRef.current && isAllUploadPausedRef.current && pendingPhotosCount > 0) {
+      return 'paused_with_pending';
+    }
+
+    // 3. No active or pending upload session (including completed, cancelled or failed batches)
+    return 'none';
+  }, []);
 
   const handleRequestExit = useCallback(() => {
+    // If full-screen photo viewer is open, close it before attempting to leave Gallery
+    if (viewerVisible) {
+      setViewerVisible(false);
+      return;
+    }
+    // If gallery actions sheet is open, close it before attempting to leave Gallery
+    if (isActionsModalVisible) {
+      setIsActionsModalVisible(false);
+      return;
+    }
+    // Prevent duplicate dialogs or triggering while exit cleanup is in flight
+    if (isLeavingRef.current || isExitModalVisible) {
+      return;
+    }
+
+    const currentState = determineUploadState();
+    setExitUploadState(currentState);
     setIsExitModalVisible(true);
-  }, []);
+  }, [viewerVisible, isActionsModalVisible, isExitModalVisible, determineUploadState]);
 
   const handleCancelExit = useCallback(() => {
+    // Stay in gallery: dismiss dialog without interrupting upload, queue or notification
+    if (isLeavingRef.current) return;
     setIsExitModalVisible(false);
   }, []);
 
-  const handleConfirmExit = useCallback(() => {
+  const handleConfirmExit = useCallback(async () => {
+    if (isLeavingRef.current) return;
+    isLeavingRef.current = true;
+    isExitingGalleryRef.current = true;
+
+    // Immediately dismiss modal to prevent duplicate interactions
     setIsExitModalVisible(false);
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    } else {
-      navigation.navigate('CameraConnected');
+
+    try {
+      if (exitUploadState === 'actively_uploading') {
+        // Case 2: Explicitly cancel active upload session, handle cleanup safely,
+        // and stop associated progress notification/service.
+        isBatchStopRequestedRef.current = true;
+
+        // Cancel selected-photo batch transfer if in flight
+        if (currentBatchControlRef.current) {
+          await currentBatchControlRef.current.cancel();
+          currentBatchControlRef.current = null;
+        }
+        if (currentBatchPipelineRef.current) {
+          await currentBatchPipelineRef.current.cleanup();
+          currentBatchPipelineRef.current = null;
+        }
+
+        // Cancel All Upload session if active
+        if (isAllUploadActiveRef.current) {
+          isAllUploadActiveRef.current = false;
+          isAllUploadPausedRef.current = false;
+          setIsAllUploadActive(false);
+          setIsAllUploadPaused(false);
+          allUploadQueueRef.current = [];
+          allUploadSessionProcessedRef.current = 0;
+          allUploadFailedIdsRef.current.clear();
+          isAllUploadWorkerRunningRef.current = false;
+          currentUploadingPhotoIdRef.current = null;
+
+          if (currentUploadControlRef.current) {
+            await currentUploadControlRef.current.cancel();
+            currentUploadControlRef.current = null;
+          }
+          if (currentPipelineRef.current) {
+            await currentPipelineRef.current.cleanup();
+            currentPipelineRef.current = null;
+          }
+        }
+
+        notificationService.stopUploadProgress();
+        isUploadingRef.current = false;
+        setIsUploading(false);
+        setUploadProgress(null);
+      } else if (exitUploadState === 'paused_with_pending') {
+        // Case 3: Clean up paused session according to existing unmount cleanup logic
+        isAllUploadActiveRef.current = false;
+        isAllUploadPausedRef.current = false;
+        setIsAllUploadActive(false);
+        setIsAllUploadPaused(false);
+        allUploadQueueRef.current = [];
+        allUploadSessionProcessedRef.current = 0;
+        allUploadFailedIdsRef.current.clear();
+        isAllUploadWorkerRunningRef.current = false;
+        currentUploadingPhotoIdRef.current = null;
+
+        if (currentUploadControlRef.current) {
+          await currentUploadControlRef.current.cancel();
+          currentUploadControlRef.current = null;
+        }
+        if (currentPipelineRef.current) {
+          await currentPipelineRef.current.cleanup();
+          currentPipelineRef.current = null;
+        }
+
+        notificationService.stopUploadProgress();
+        isUploadingRef.current = false;
+        setIsUploading(false);
+        setUploadProgress(null);
+      } else {
+        // Case 1: No active or pending upload. Clean up any completed/idle All Upload flags
+        if (isAllUploadActiveRef.current) {
+          isAllUploadActiveRef.current = false;
+          isAllUploadPausedRef.current = false;
+          setIsAllUploadActive(false);
+          setIsAllUploadPaused(false);
+          allUploadQueueRef.current = [];
+          allUploadSessionProcessedRef.current = 0;
+          notificationService.stopUploadProgress();
+        }
+      }
+    } catch (err) {
+      console.warn('[PhotoGallery] Error during exit cleanup:', err);
+    } finally {
+      // Navigate back only after cancellation has been fully handled
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        navigation.navigate('CameraConnected', {
+          eventId,
+          eventTitle,
+        });
+      }
     }
-  }, [navigation]);
+  }, [exitUploadState, navigation, eventId, eventTitle]);
 
   const handleBack = handleRequestExit;
 
@@ -1007,19 +1155,23 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       if (isActionsModalVisible) {
         return false;
       }
+      // If exit/navigation is already in progress, absorb the back press
+      if (isLeavingRef.current) {
+        return true;
+      }
       // If the exit confirmation dialog is already open, dismiss it (stay in gallery)
       if (isExitModalVisible) {
         setIsExitModalVisible(false);
         return true;
       }
-      // Otherwise, show the confirmation dialog
-      setIsExitModalVisible(true);
+      // Otherwise, show confirmation dialog via shared function
+      handleRequestExit();
       return true;
     };
 
     const backSubscription = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
     return () => backSubscription.remove();
-  }, [viewerVisible, isActionsModalVisible, isExitModalVisible]);
+  }, [viewerVisible, isActionsModalVisible, isExitModalVisible, handleRequestExit]);
 
   const toggleFavoritePhoto = useCallback((id: string) => {
     setFavoritePhotoIds(prev => {
@@ -1281,6 +1433,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             '[AllUpload] Queue empty. Remaining in active state for future new photos...',
           );
           setUploadProgress(null);
+          if (allUploadSessionProcessedRef.current > 0) {
+            notificationService.showUploadComplete(allUploadSessionProcessedRef.current);
+          } else {
+            notificationService.stopUploadProgress();
+          }
           break;
         }
 
@@ -1307,16 +1464,23 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         const cancelControl = new UploadCancellationControl();
         currentUploadControlRef.current = cancelControl;
 
+        const currentNum = allUploadSessionProcessedRef.current + 1;
+        const totalNum =
+          allUploadSessionProcessedRef.current + allUploadQueueRef.current.length + 1;
+
         progressAnim.setValue(0);
         setUploadProgress({
-          current: allUploadSessionProcessedRef.current + 1,
-          total: allUploadSessionProcessedRef.current + allUploadQueueRef.current.length + 1,
+          current: currentNum,
+          total: totalNum,
           filename: photo.filename,
           bytePercentage: 0,
         });
 
         isUploadingRef.current = true;
         setIsUploading(true);
+
+        const initialBatchPct = (allUploadSessionProcessedRef.current / totalNum) * 100;
+        notificationService.updateUploadProgress(currentNum, totalNum, initialBatchPct);
 
         try {
           // 1. Await preparation for the active photo (uses background lookahead if available)
@@ -1344,6 +1508,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
           // 3. Network upload — strictly 1 active network transfer at any time
           let lastStateUpdate = 0;
+          let lastNotificationUpdate = 0;
           await uploadPreparedPhoto(
             eventId,
             prepared,
@@ -1360,6 +1525,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 lastStateUpdate = now;
                 setUploadProgress(prev => (prev ? { ...prev, bytePercentage: percentage } : prev));
               }
+
+              if (now - lastNotificationUpdate > 500 || percentage >= 99.9) {
+                lastNotificationUpdate = now;
+                const batchPct =
+                  ((allUploadSessionProcessedRef.current + percentage / 100) / totalNum) * 100;
+                notificationService.updateUploadProgress(currentNum, totalNum, batchPct);
+              }
             },
             cancelControl,
           );
@@ -1373,6 +1545,12 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           console.log(`[AllUpload] Photo ${photo.filename || photo.id} uploaded successfully.`);
 
           allUploadSessionProcessedRef.current += 1;
+          const completedBatchPct = (allUploadSessionProcessedRef.current / totalNum) * 100;
+          notificationService.updateUploadProgress(
+            allUploadSessionProcessedRef.current,
+            totalNum,
+            completedBatchPct,
+          );
           handlePhotoUploadSuccess(photo);
         } catch (err: any) {
           if (isUploadCancelledError(err) || cancelControl.isCancelled) {
@@ -1415,6 +1593,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           setIsUploading(false);
         }
       }
+      if (!isAllUploadActiveRef.current || isAllUploadPausedRef.current) {
+        notificationService.stopUploadProgress();
+      }
       // If resumed while the worker was unwinding the previous cancelled photo, re-trigger processing
       if (
         isAllUploadActiveRef.current &&
@@ -1448,6 +1629,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       return;
     }
 
+    // Ensure notification permission requested if needed (non-blocking)
+    notificationService.ensurePermission().catch(() => {});
+
     isAllUploadActiveRef.current = true;
     setIsAllUploadActive(true);
     isAllUploadPausedRef.current = false;
@@ -1468,6 +1652,10 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
       `[AllUpload] Session started with ${allUploadQueueRef.current.length} unuploaded photos.`,
     );
 
+    if (allUploadQueueRef.current.length > 0) {
+      notificationService.startUploadProgress(1, allUploadQueueRef.current.length, 0);
+    }
+
     processAllUploadQueue();
   }, [eventId, processAllUploadQueue]);
 
@@ -1480,6 +1668,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     console.log('[AllUpload] Pausing All Upload session...');
     isAllUploadPausedRef.current = true;
     setIsAllUploadPaused(true);
+
+    // Stop ongoing foreground progress notification safely without claiming complete or cancel
+    notificationService.stopUploadProgress();
 
     // Cancel active upload task if one is currently in flight
     if (currentUploadControlRef.current) {
@@ -1521,6 +1712,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
     console.log('[AllUpload] Resuming All Upload session...');
     isAllUploadPausedRef.current = false;
     setIsAllUploadPaused(false);
+
+    // Ensure notification permission requested if needed (non-blocking)
+    notificationService.ensurePermission().catch(() => {});
+
+    const totalRemaining = allUploadSessionProcessedRef.current + allUploadQueueRef.current.length;
+    if (totalRemaining > 0) {
+      const currentNum = allUploadSessionProcessedRef.current + 1;
+      const currentPct = (allUploadSessionProcessedRef.current / totalRemaining) * 100;
+      notificationService.startUploadProgress(currentNum, totalRemaining, currentPct);
+    }
 
     // Resume processing existing queue (the previously paused photo is at the front)
     processAllUploadQueue();
@@ -1578,6 +1779,9 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         // Double-check the lock inside the async callback (in case of double taps on the Alert)
         if (isUploadingRef.current) return;
 
+        // Ensure notification permission requested if needed (non-blocking)
+        notificationService.ensurePermission().catch(() => {});
+
         isUploadingRef.current = true;
         setIsUploading(true);
 
@@ -1589,10 +1793,14 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
         console.log(`[PhotoGallery] Starting batch upload of ${total} photos.`);
         setUploadProgress({ current: 0, total });
 
+        // Start ongoing foreground notification
+        notificationService.startUploadProgress(1, total, 0);
+
         const pipeline = new UploadLookaheadPipeline();
         currentBatchPipelineRef.current = pipeline;
         isBatchStopRequestedRef.current = false;
         setIsBatchStopRequested(false);
+        isExitingGalleryRef.current = false;
 
         try {
           for (let i = 0; i < total; i++) {
@@ -1618,9 +1826,16 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             });
             setUploadingPhotoIds(prev => new Set(prev).add(photo.id));
 
+            // Update notification for current photo start
+            const photoStartBatchPct = (i / total) * 100;
+            notificationService.updateUploadProgress(i + 1, total, photoStartBatchPct);
+
+            const cancelControl = new UploadCancellationControl();
+            currentBatchControlRef.current = cancelControl;
+
             try {
               // 1. Prepare active photo (reuses lookahead prepared in previous iteration)
-              const prepared = await pipeline.getPrepared(photo);
+              const prepared = await pipeline.getPrepared(photo, cancelControl);
 
               // 2. Pre-compress the next photo in the background only if stop has not been requested
               if (
@@ -1633,39 +1848,60 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
 
               // 3. Network upload — strictly 1 active network transfer at any time
               let lastStateUpdate = 0;
-              await uploadPreparedPhoto(eventId, prepared, null, percentage => {
-                // Smoothly animate the bar
-                Animated.timing(progressAnim, {
-                  toValue: percentage,
-                  duration: 200,
-                  useNativeDriver: false,
-                }).start();
+              let lastNotificationUpdate = 0;
+              await uploadPreparedPhoto(
+                eventId,
+                prepared,
+                null,
+                percentage => {
+                  // Smoothly animate the bar
+                  Animated.timing(progressAnim, {
+                    toValue: percentage,
+                    duration: 200,
+                    useNativeDriver: false,
+                  }).start();
 
-                // Throttle full React state updates to avoid unnecessary gallery re-renders
-                const now = Date.now();
-                if (now - lastStateUpdate > 250 || percentage >= 99.9) {
-                  lastStateUpdate = now;
-                  setUploadProgress(prev =>
-                    prev ? { ...prev, bytePercentage: percentage } : prev,
-                  );
-                }
-              });
+                  // Throttle full React state updates to avoid unnecessary gallery re-renders
+                  const now = Date.now();
+                  if (now - lastStateUpdate > 250 || percentage >= 99.9) {
+                    lastStateUpdate = now;
+                    setUploadProgress(prev =>
+                      prev ? { ...prev, bytePercentage: percentage } : prev,
+                    );
+                  }
+
+                  // Throttle notification updates (~500ms) with accurate overall batch progress
+                  if (now - lastNotificationUpdate > 500 || percentage >= 99.9) {
+                    lastNotificationUpdate = now;
+                    const currentBatchPct = ((i + percentage / 100) / total) * 100;
+                    notificationService.updateUploadProgress(i + 1, total, currentBatchPct);
+                  }
+                },
+                cancelControl,
+              );
 
               // Ensure we show 100% when success is confirmed
               progressAnim.setValue(100);
               setUploadProgress(prev => (prev ? { ...prev, bytePercentage: 100 } : prev));
 
               successCount++;
+              const completedBatchPct = ((i + 1) / total) * 100;
+              notificationService.updateUploadProgress(i + 1, total, completedBatchPct);
               console.log(`[PhotoGallery] Photo ${photo.filename} uploaded successfully.`);
 
               // Mark individual photo as uploaded immediately upon success via shared handler
               handlePhotoUploadSuccess(photo);
             } catch (err: any) {
+              if (isUploadCancelledError(err) || cancelControl.isCancelled) {
+                console.log(`[PhotoGallery] Batch photo ${photo.filename} upload cancelled.`);
+                break;
+              }
               const errorMsg = err?.message || 'Upload failed';
               console.error(`[PhotoGallery] Upload error for ${photo.filename}:`, errorMsg);
               failReasons.push(`${photo.filename}: ${errorMsg}`);
               failCount++;
             } finally {
+              currentBatchControlRef.current = null;
               setUploadingPhotoIds(prev => {
                 const next = new Set(prev);
                 next.delete(photo.id);
@@ -1683,6 +1919,7 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           const wasStopped = isBatchStopRequestedRef.current;
           await pipeline.cleanup();
           currentBatchPipelineRef.current = null;
+          currentBatchControlRef.current = null;
           // ALWAYS release the lock
           isUploadingRef.current = false;
           setIsUploading(false);
@@ -1693,12 +1930,32 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
             `[PhotoGallery] Batch complete. Success: ${successCount}, Failed: ${failCount}, Stopped: ${wasStopped}`,
           );
 
-          if (wasStopped && successCount + failCount < total) {
+          // Update Android notification results safely
+          try {
+            if (isExitingGalleryRef.current) {
+              notificationService.stopUploadProgress();
+            } else if (wasStopped && successCount + failCount < total) {
+              notificationService.showUploadCancelled(successCount, total);
+            } else if (failCount === 0) {
+              notificationService.showUploadComplete(successCount);
+            } else if (successCount > 0) {
+              const errorSummary = `${failCount} of ${total} photo${failCount > 1 ? 's' : ''} failed`;
+              notificationService.showUploadFailed(errorSummary, successCount, total);
+            } else {
+              const errorSummary = failReasons[0] || 'Upload failed';
+              notificationService.showUploadFailed(errorSummary, 0, total);
+            }
+          } catch (notifErr) {
+            console.warn('[PhotoGallery] Error updating final upload notification:', notifErr);
+            notificationService.stopUploadProgress();
+          }
+
+          if (!isExitingGalleryRef.current && wasStopped && successCount + failCount < total) {
             Alert.alert(
               'Upload Stopped',
               `Batch stopped after current photo settled.\n\nUploaded: ${successCount}\nRemaining: ${total - successCount - failCount}${failCount > 0 ? `\nFailed: ${failCount}` : ''}`,
             );
-          } else if (failCount === 0) {
+          } else if (!isExitingGalleryRef.current && failCount === 0) {
             Alert.alert(
               'Upload Complete! 🚀',
               `Successfully uploaded ${successCount} photo${successCount !== 1 ? 's' : ''} to "${eventTitle}".`,
@@ -2821,7 +3078,13 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                 },
               ]}
               accessibilityRole="alert"
-              accessibilityLabel="Leave Gallery confirmation"
+              accessibilityLabel={
+                exitUploadState === 'actively_uploading'
+                  ? 'Upload in progress confirmation'
+                  : exitUploadState === 'paused_with_pending'
+                    ? 'Upload paused confirmation'
+                    : 'Leave Gallery confirmation'
+              }
             >
               {/* Icon Container */}
               <View
@@ -2845,7 +3108,11 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                   },
                 ]}
               >
-                Leave Gallery?
+                {exitUploadState === 'actively_uploading'
+                  ? 'Upload in Progress'
+                  : exitUploadState === 'paused_with_pending'
+                    ? 'Upload Paused'
+                    : 'Leave Gallery?'}
               </Text>
 
               {/* Message */}
@@ -2857,21 +3124,32 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
                   },
                 ]}
               >
-                Your photos may take a little time to load when you return to the Gallery. Are you
-                sure you want to leave now?
+                {exitUploadState === 'actively_uploading'
+                  ? "If you leave Gallery now, the current upload will stop. Photos that haven't finished uploading may need to be uploaded again. Do you want to leave?"
+                  : exitUploadState === 'paused_with_pending'
+                    ? 'Your upload is paused. If you leave Gallery now, the remaining photos in the upload queue will be cleared. You may need to select and upload them again. Do you want to leave?'
+                    : 'Your photos may take a little time to load when you return to the Gallery. Are you sure you want to leave now?'}
               </Text>
 
               {/* Action Buttons */}
               <View style={styles.exitModalButtonContainer}>
-                {/* Primary Button: Leave Gallery */}
+                {/* Primary Button */}
                 <TouchableOpacity
                   activeOpacity={0.82}
                   onPress={handleConfirmExit}
                   style={styles.exitModalPrimaryButton}
                   accessibilityRole="button"
-                  accessibilityLabel="Leave Gallery"
+                  accessibilityLabel={
+                    exitUploadState === 'actively_uploading'
+                      ? 'Leave & Stop Upload'
+                      : 'Leave Gallery'
+                  }
                 >
-                  <Text style={styles.exitModalPrimaryButtonText}>Leave Gallery</Text>
+                  <Text style={styles.exitModalPrimaryButtonText}>
+                    {exitUploadState === 'actively_uploading'
+                      ? 'Leave & Stop Upload'
+                      : 'Leave Gallery'}
+                  </Text>
                 </TouchableOpacity>
 
                 {/* Secondary Button: Stay in Gallery */}

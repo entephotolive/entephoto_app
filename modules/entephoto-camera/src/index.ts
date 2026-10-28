@@ -7,6 +7,7 @@ import EntePhotoCameraModule, {
   PhotoSkippedEvent,
 } from './EntePhotoCameraModule';
 import { EventSubscription } from 'expo-modules-core';
+import { Platform, PermissionsAndroid } from 'react-native';
 
 export function getStatus(): string {
   return EntePhotoCameraModule.getStatus();
@@ -123,6 +124,96 @@ export function clearDiagnosticLogs(): void {
  */
 export function getDiagnosticText(): string {
   return EntePhotoCameraModule.getDiagnosticText();
+}
+
+// ── Notification APIs ──────────────────────────────────────────────────────
+
+export function hasNotificationPermission(): boolean {
+  return EntePhotoCameraModule?.hasNotificationPermission?.() ?? false;
+}
+
+export async function requestNotificationPermission(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  if (Platform.Version < 33) return hasNotificationPermission();
+
+  try {
+    const perm =
+      PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS ||
+      ('android.permission.POST_NOTIFICATIONS' as any);
+    const granted = await PermissionsAndroid.request(perm);
+    return granted === PermissionsAndroid.RESULTS.GRANTED;
+  } catch (err) {
+    console.warn('[EntePhotoCamera] Failed to request notification permission:', err);
+    return false;
+  }
+}
+
+export function showCameraSearching(): void {
+  EntePhotoCameraModule?.showCameraSearching?.();
+}
+
+export function showCameraConnected(cameraName?: string | null): void {
+  EntePhotoCameraModule?.showCameraConnected?.(cameraName ?? null);
+}
+
+export function dismissCamera(): void {
+  EntePhotoCameraModule?.dismissCamera?.();
+}
+
+export function dismissCameraNotification(): void {
+  EntePhotoCameraModule?.dismissCameraNotification?.();
+}
+
+export function startUploadService(
+  current: number,
+  total: number,
+  percentage?: number | null,
+): void {
+  EntePhotoCameraModule?.startUploadService?.(
+    Math.max(1, current),
+    Math.max(0, total),
+    percentage ?? null,
+  );
+}
+
+export function updateUploadProgress(
+  current: number,
+  total: number,
+  percentage?: number | null,
+): void {
+  EntePhotoCameraModule?.updateUploadProgress?.(
+    Math.max(1, current),
+    Math.max(0, total),
+    percentage ?? null,
+  );
+}
+
+export function stopUploadService(): void {
+  EntePhotoCameraModule?.stopUploadService?.();
+}
+
+export function showUploadComplete(count: number): void {
+  EntePhotoCameraModule?.showUploadComplete?.(Math.max(0, count));
+}
+
+export function showUploadCancelled(uploadedCount: number, total: number): void {
+  EntePhotoCameraModule?.showUploadCancelled?.(Math.max(0, uploadedCount), Math.max(0, total));
+}
+
+export function showUploadFailed(message: string, successCount: number, total: number): void {
+  EntePhotoCameraModule?.showUploadFailed?.(
+    message || 'Upload failed',
+    Math.max(0, successCount),
+    Math.max(0, total),
+  );
+}
+
+export function dismissUpload(): void {
+  EntePhotoCameraModule?.dismissUpload?.();
+}
+
+export function dismissUploadNotification(): void {
+  EntePhotoCameraModule?.dismissUploadNotification?.();
 }
 
 export {
