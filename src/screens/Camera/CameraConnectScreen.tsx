@@ -9,10 +9,10 @@ import {
   Animated,
   Platform,
   Modal,
-  ActivityIndicator,
+  Easing,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Path, Polygon } from 'react-native-svg';
+import Svg, { Path, Polygon, Circle } from 'react-native-svg';
 import {
   ArrowLeft,
   Calendar,
@@ -70,6 +70,67 @@ const SparkleStarSvg: React.FC<{ size?: number; color?: string; opacity?: number
   </Svg>
 );
 
+// ── Coral Circular Spinner Component (22px with subtle darker track) ──────
+const CoralSpinner: React.FC<{ size?: number }> = ({ size = 22 }) => {
+  const [spinAnim] = useState(() => new Animated.Value(0));
+
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.timing(spinAnim, {
+        toValue: 1,
+        duration: 900,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    animation.start();
+    return () => {
+      animation.stop();
+      spinAnim.setValue(0);
+    };
+  }, [spinAnim]);
+
+  const spin = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  return (
+    <Animated.View
+      style={{
+        width: size,
+        height: size,
+        alignItems: 'center',
+        justifyContent: 'center',
+        transform: [{ rotate: spin }],
+      }}
+    >
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        {/* Subtle darker track */}
+        <Circle
+          cx={12}
+          cy={12}
+          r={9.5}
+          stroke="rgba(255, 107, 74, 0.2)"
+          strokeWidth={2.5}
+          fill="none"
+        />
+        {/* Coral spinner indicator */}
+        <Circle
+          cx={12}
+          cy={12}
+          r={9.5}
+          stroke="#FF6B4A"
+          strokeWidth={2.5}
+          strokeDasharray="22 38"
+          strokeLinecap="round"
+          fill="none"
+        />
+      </Svg>
+    </Animated.View>
+  );
+};
+
 export const CameraConnectScreen: React.FC = () => {
   const navigation = useNavigation<AppNavigationProp>();
   const route = useRoute<RouteProp<AppStackParamList, 'CameraConnect'>>();
@@ -95,9 +156,6 @@ export const CameraConnectScreen: React.FC = () => {
   const [isWifiUnavailableModalVisible, setIsWifiUnavailableModalVisible] = useState(false);
   const [isDiagnosticVisible, setIsDiagnosticVisible] = useState(false);
 
-  // Animated Search Pulse
-  const pulseAnimRef = useRef(new Animated.Value(1));
-
   // Refs for search session and timer tracking
   const cameraStateRef = useRef<ConnectionState>('idle');
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -116,35 +174,6 @@ export const CameraConnectScreen: React.FC = () => {
     }
   }, []);
 
-  // Sync Animated Search Pulse with isSearching state
-  useEffect(() => {
-    const pulseAnim = pulseAnimRef.current;
-    if (isSearching) {
-      const loop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.03,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-        ]),
-      );
-      loop.start();
-      return () => {
-        loop.stop();
-        pulseAnim.setValue(1);
-      };
-    } else {
-      pulseAnim.stopAnimation();
-      pulseAnim.setValue(1);
-    }
-  }, [isSearching]);
-
   // Functional Back Navigation Handler
   const handleBack = useCallback(() => {
     if (navigation.canGoBack()) {
@@ -159,6 +188,14 @@ export const CameraConnectScreen: React.FC = () => {
   }, []);
 
   const handleGoToGallery = useCallback(() => {
+    clearSearchTimers();
+    if (cameraStateRef.current === 'searching') {
+      try {
+        stopSearch();
+      } catch (e) {
+        console.warn('[CameraConnect] stopSearch() on handleGoToGallery threw:', e);
+      }
+    }
     navigation.navigate('PhotoSelectionGallery', {
       eventId: route.params?.eventId,
       eventTitle,
@@ -167,6 +204,7 @@ export const CameraConnectScreen: React.FC = () => {
       coverImage,
     });
   }, [
+    clearSearchTimers,
     navigation,
     route.params?.eventId,
     route.params?.eventDate,
@@ -554,55 +592,78 @@ export const CameraConnectScreen: React.FC = () => {
                 disabled={isSearching}
                 accessibilityRole="button"
                 accessibilityLabel={isSearching ? 'Searching for your camera' : 'Try Again'}
-                style={({ pressed }) => [
-                  styles.ctaButtonWrapper,
-                  {
-                    transform: [
-                      {
-                        translateY: pressed && !isSearching ? 2 : 0,
-                      },
-                    ],
-                  },
-                ]}
+                style={styles.ctaButtonWrapper}
               >
                 {({ pressed }) => (
                   <View style={styles.ctaButtonContainer}>
+                    <View style={styles.ctaSearhShadowLayer} />
                     <View
-                      style={[
-                        styles.ctaSearhShadowLayer,
-                        {
-                          top: pressed && !isSearching ? 2 : 6,
-                          left: 0,
-                          right: 0,
-                          bottom: pressed && !isSearching ? -2 : -6,
-                        },
-                      ]}
-                    />
-                    <Animated.View
                       style={[
                         styles.ctaButtonFace,
                         {
-                          transform: [{ scale: pulseAnimRef.current }],
+                          transform: [
+                            {
+                              translateY: pressed && !isSearching ? 2 : 0,
+                            },
+                          ],
                         },
                       ]}
                     >
                       {isSearching ? (
                         <View style={styles.searchingRow}>
-                          <ActivityIndicator size="small" color="#FF6B4A" />
+                          <CoralSpinner size={22} />
                           <Text style={styles.ctaButtonText}>Searching for your camera...</Text>
                         </View>
                       ) : (
-                        <>
+                        <View style={styles.idleRow}>
                           <Text style={styles.ctaButtonText}>Try Again</Text>
-                          <ArrowRight
-                            size={20}
-                            color="#FFFFFF"
-                            strokeWidth={2.3}
-                            style={{ marginLeft: 6 }}
-                          />
-                        </>
+                          <ArrowRight size={20} color="#FFFFFF" strokeWidth={2.3} />
+                        </View>
                       )}
-                    </Animated.View>
+                    </View>
+                  </View>
+                )}
+              </Pressable>
+
+              {/* Secondary Action Button: "Go to Gallery" */}
+              <Pressable
+                onPress={handleGoToGallery}
+                accessibilityRole="button"
+                accessibilityLabel="Go to Gallery"
+                accessibilityHint="Navigate directly to the photo gallery for this event"
+                style={styles.gallerySecondaryBtnWrapper}
+              >
+                {({ pressed }) => (
+                  <View
+                    style={[
+                      styles.gallerySecondaryBtnFace,
+                      {
+                        backgroundColor: isDark
+                          ? pressed
+                            ? '#26262E'
+                            : '#1A1A1E'
+                          : pressed
+                            ? '#F1E9DF'
+                            : '#FFFDF9',
+                        borderColor: isDark ? '#2E2E36' : '#161616',
+                        transform: [{ translateY: pressed ? 1.5 : 0 }],
+                      },
+                    ]}
+                  >
+                    <ImageIcon
+                      size={18}
+                      color={isDark ? '#F4F4F5' : '#161616'}
+                      strokeWidth={2.2}
+                      style={{ marginRight: 8 }}
+                    />
+                    <Text
+                      style={[
+                        styles.gallerySecondaryBtnText,
+                        { color: isDark ? '#F4F4F5' : '#161616' },
+                      ]}
+                    >
+                      Go to Gallery
+                    </Text>
                   </View>
                 )}
               </Pressable>
@@ -1041,58 +1102,38 @@ export const CameraConnectScreen: React.FC = () => {
                 disabled={isSearching}
                 accessibilityRole="button"
                 accessibilityLabel={isSearching ? 'Searching for your camera' : 'Search for Camera'}
-                style={({ pressed }) => [
-                  styles.ctaButtonWrapper,
-                  {
-                    transform: [
-                      {
-                        translateY: pressed && !isSearching ? 2 : 0,
-                      },
-                    ],
-                  },
-                ]}
+                style={styles.ctaButtonWrapper}
               >
                 {({ pressed }) => (
                   <View style={styles.ctaButtonContainer}>
                     {/* Tactile Coral Shadow Layer Underneath (matching SelectEventScreen Continue button) */}
-                    <View
-                      style={[
-                        styles.ctaSearhShadowLayer,
-                        {
-                          top: pressed && !isSearching ? 2 : 6,
-                          left: 0,
-                          right: 0,
-                          bottom: pressed && !isSearching ? -2 : -6,
-                        },
-                      ]}
-                    />
+                    <View style={styles.ctaSearhShadowLayer} />
 
                     {/* Main Black Button Face */}
-                    <Animated.View
+                    <View
                       style={[
                         styles.ctaButtonFace,
                         {
-                          transform: [{ scale: pulseAnimRef.current }],
+                          transform: [
+                            {
+                              translateY: pressed && !isSearching ? 2 : 0,
+                            },
+                          ],
                         },
                       ]}
                     >
                       {isSearching ? (
                         <View style={styles.searchingRow}>
-                          <ActivityIndicator size="small" color="#FF6B4A" />
+                          <CoralSpinner size={22} />
                           <Text style={styles.ctaButtonText}>Searching for your camera...</Text>
                         </View>
                       ) : (
-                        <>
+                        <View style={styles.idleRow}>
                           <Text style={styles.ctaButtonText}>Search for Camera</Text>
-                          <ArrowRight
-                            size={20}
-                            color="#FFFFFF"
-                            strokeWidth={2.3}
-                            style={{ marginLeft: 6 }}
-                          />
-                        </>
+                          <ArrowRight size={20} color="#FFFFFF" strokeWidth={2.3} />
+                        </View>
                       )}
-                    </Animated.View>
+                    </View>
                   </View>
                 )}
               </Pressable>
@@ -1739,9 +1780,14 @@ const styles = StyleSheet.create({
   ctaButtonContainer: {
     position: 'relative',
     width: '100%',
+    height: 56,
   },
   ctaSearhShadowLayer: {
     position: 'absolute',
+    top: 6,
+    left: 0,
+    right: 0,
+    bottom: -6,
     backgroundColor: '#FF6F4E',
     borderRadius: 28,
     zIndex: 0,
@@ -1764,7 +1810,34 @@ const styles = StyleSheet.create({
   searchingRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  idleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
+  },
+
+  // ── Secondary Action Button ("Go to Gallery" in Not Found state) ──
+  gallerySecondaryBtnWrapper: {
+    width: '100%',
+    height: 52,
+    marginBottom: 12,
+  },
+  gallerySecondaryBtnFace: {
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1.5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gallerySecondaryBtnText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 15,
+    letterSpacing: 0.2,
   },
 
   // ── 7. Error / Disconnected Banner ──
