@@ -46,9 +46,14 @@ import { CameraDiagnosticConsole } from './CameraDiagnosticConsole';
 
 // ── Image Assets ────────────────────────────────────────────────────────────
 const CAMERA_HERO_IMAGE = require('../../../assets/ctAYourCamera/28328fe7-79dc-438d-8f78-16cd13c144cf.png');
+const CAMERA_NOT_FOUND_IMAGE = require('../../../assets/ctAYourCamera/camera-not-found.png');
 const WIFI_3D_ICON = require('../../../assets/ctAYourCamera/511408e8-83d9-49f8-a1d5-e769833c09f3.png');
 const USBC_3D_ICON = require('../../../assets/ctAYourCamera/a40bb110-a40e-4376-8664-d5434b687765.png');
 const DEFAULT_AVATAR = require('../../../assets/image.png');
+
+// ── Search & Timeout Timing Configuration ──────────────────────────────────
+const SEARCH_TIMEOUT_MS = 6000;
+const TRANSITION_DELAY_MS = 2000;
 
 // ── 4-Point Neo-Brutalist Sparkle Star Component ───────────────────────────
 const SparkleStarSvg: React.FC<{ size?: number; color?: string; opacity?: number }> = ({
@@ -83,6 +88,7 @@ export const CameraConnectScreen: React.FC = () => {
   // ── Native camera bridge state ────────────────────────────────────────────
   const [cameraState, setCameraState] = useState<ConnectionState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isNotFound, setIsNotFound] = useState(false);
   const isSearching = cameraState === 'searching' || cameraState === 'connecting';
 
   const [isHelpModalVisible, setIsHelpModalVisible] = useState(false);
@@ -91,6 +97,53 @@ export const CameraConnectScreen: React.FC = () => {
 
   // Animated Search Pulse
   const pulseAnimRef = useRef(new Animated.Value(1));
+
+  // Refs for search session and timer tracking
+  const cameraStateRef = useRef<ConnectionState>('idle');
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSessionIdRef = useRef<number>(0);
+
+  // Helper to safely clear all active search and transition timers
+  const clearSearchTimers = useCallback(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+      searchTimeoutRef.current = null;
+    }
+    if (transitionTimeoutRef.current) {
+      clearTimeout(transitionTimeoutRef.current);
+      transitionTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Sync Animated Search Pulse with isSearching state
+  useEffect(() => {
+    const pulseAnim = pulseAnimRef.current;
+    if (isSearching) {
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1.03,
+            duration: 600,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 600,
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+      loop.start();
+      return () => {
+        loop.stop();
+        pulseAnim.setValue(1);
+      };
+    } else {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(1);
+    }
+  }, [isSearching]);
 
   // Functional Back Navigation Handler
   const handleBack = useCallback(() => {
@@ -128,27 +181,18 @@ export const CameraConnectScreen: React.FC = () => {
 
     const stateListener = addConnectionStateListener(event => {
       console.log('[CameraConnect] Native connection state:', event.state);
+      cameraStateRef.current = event.state;
       setCameraState(event.state);
 
-      if (event.state === 'searching') {
-        // Start pulse animation while searching
-        Animated.loop(
-          Animated.sequence([
-            Animated.timing(pulseAnimRef.current, {
-              toValue: 1.03,
-              duration: 600,
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseAnimRef.current, {
-              toValue: 1,
-              duration: 600,
-              useNativeDriver: true,
-            }),
-          ]),
-        ).start();
-      } else {
-        pulseAnimRef.current.stopAnimation();
-        pulseAnimRef.current.setValue(1);
+      // Invalidate/cancel any active timeout if connection attempt or permission is in progress
+      if (
+        event.state === 'connecting' ||
+        event.state === 'connected' ||
+        event.state === 'reconnecting' ||
+        event.state === 'permission_required'
+      ) {
+        clearSearchTimers();
+        setIsNotFound(false);
       }
 
       if (event.state !== 'error') {
@@ -158,6 +202,10 @@ export const CameraConnectScreen: React.FC = () => {
 
     const deviceFoundListener = addDeviceFoundListener(event => {
       console.log('[CameraConnect] Native device found:', event.deviceName);
+      cameraStateRef.current = 'connected';
+      clearSearchTimers();
+      setIsNotFound(false);
+
       if (!navigation.isFocused()) {
         console.log('[CameraConnect] Screen is not focused — ignoring onDeviceFound navigation');
         return;
@@ -177,6 +225,9 @@ export const CameraConnectScreen: React.FC = () => {
 
     const disconnectedListener = addDeviceDisconnectedListener(event => {
       console.log('[CameraConnect] Native device disconnected, reason:', event.reason);
+      cameraStateRef.current = 'disconnected';
+      clearSearchTimers();
+      setIsNotFound(false);
 
       // Map native reason codes to user-friendly messages
       let userMessage: string;
@@ -202,7 +253,10 @@ export const CameraConnectScreen: React.FC = () => {
     });
 
     return () => {
-      console.log('[CameraConnect] Screen unmounting — removing native camera listeners');
+      console.log(
+        '[CameraConnect] Screen unmounting — removing native camera listeners and timers',
+      );
+      clearSearchTimers();
       stateListener.remove();
       deviceFoundListener.remove();
       disconnectedListener.remove();
@@ -214,8 +268,8 @@ export const CameraConnectScreen: React.FC = () => {
       }
     };
   }, [
+    clearSearchTimers,
     navigation,
-    pulseAnimRef,
     route.params?.eventId,
     route.params?.eventDate,
     route.params?.eventCategory,
@@ -229,19 +283,101 @@ export const CameraConnectScreen: React.FC = () => {
       console.log('[CameraConnect] Search button pressed — already searching, ignoring duplicate');
       return;
     }
-    console.log('[CameraConnect] Search button pressed');
-    setErrorMessage(null);
+    console.log('[CameraConnect] Starting fresh camera search');
 
+    // 1. Clear any pending search-timeout or transition-delay timers
+    clearSearchTimers();
+
+    // 2. Invalidate previous search session so stale events cannot update the new search UI
+    searchSessionIdRef.current += 1;
+    const currentSessionId = searchSessionIdRef.current;
+
+    // 3. Reset error and not-found states
+    setErrorMessage(null);
+    setIsNotFound(false);
+
+    // 4. Terminate any previous active discovery session safely
+    try {
+      stopSearch();
+    } catch (e) {
+      console.warn('[CameraConnect] stopSearch() prior to search threw:', e);
+    }
+
+    // 5. Start fresh search using existing startSearch() implementation
     try {
       startSearch();
-      // State update (idle → searching) will arrive via onConnectionStateChanged listener
+      cameraStateRef.current = 'searching';
+      setCameraState('searching');
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       console.error('[CameraConnect] startSearch() threw:', message);
+      cameraStateRef.current = 'error';
       setCameraState('error');
       setErrorMessage('Could not start camera search. Please restart the app and try again.');
+      return;
     }
-  }, [isSearching]);
+
+    // 6. Schedule real search timeout (approx. 6 seconds)
+    searchTimeoutRef.current = setTimeout(() => {
+      // Confirm current search session is still active
+      if (currentSessionId !== searchSessionIdRef.current) {
+        console.log('[CameraConnect] Timeout fired for stale session, ignoring');
+        return;
+      }
+
+      const currentState = cameraStateRef.current;
+      console.log('[CameraConnect] Search window expired. Current state:', currentState);
+
+      // Do not time out if a valid connection or permission attempt is already in progress
+      if (
+        currentState === 'connecting' ||
+        currentState === 'connected' ||
+        currentState === 'reconnecting' ||
+        currentState === 'permission_required'
+      ) {
+        console.log('[CameraConnect] Connection/permission in progress — cancelling timeout');
+        return;
+      }
+
+      // Invoke existing native stopSearch() API to stop discovery and prevent indefinite polling
+      try {
+        console.log('[CameraConnect] Stopping discovery loop upon search timeout');
+        stopSearch();
+      } catch (e) {
+        console.warn('[CameraConnect] stopSearch() on timeout threw:', e);
+      }
+
+      // Transition the UI out of searching state safely
+      cameraStateRef.current = 'idle';
+      setCameraState('idle');
+
+      // Wait 2 seconds before showing the camera-not-found screen
+      transitionTimeoutRef.current = setTimeout(() => {
+        if (currentSessionId !== searchSessionIdRef.current) {
+          console.log('[CameraConnect] Transition delay fired for stale session, ignoring');
+          return;
+        }
+
+        const stateAfterDelay = cameraStateRef.current;
+        if (
+          stateAfterDelay === 'connecting' ||
+          stateAfterDelay === 'connected' ||
+          stateAfterDelay === 'reconnecting' ||
+          stateAfterDelay === 'permission_required'
+        ) {
+          console.log(
+            '[CameraConnect] State progressed during transition delay — ignoring not-found',
+          );
+          return;
+        }
+
+        console.log(
+          '[CameraConnect] Search definitively finished without camera — showing Not Found',
+        );
+        setIsNotFound(true);
+      }, TRANSITION_DELAY_MS);
+    }, SEARCH_TIMEOUT_MS);
+  }, [clearSearchTimers, isSearching]);
 
   return (
     <AppBackground>
@@ -324,471 +460,644 @@ export const CameraConnectScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* ── 2. HERO HEADLINE & STICKER ── */}
-          <View style={styles.heroSection}>
-            <View style={styles.heroTitleRow}>
-              <Text style={[styles.heroHeadline, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                Connect{'\n'}your camera<Text style={{ color: '#FF6B4A' }}>.</Text>
-              </Text>
-
-              {/* Angled Mono Sticker Badge */}
-              <View style={styles.stickerBadge}>
-                <Text style={styles.stickerText}>SAME</Text>
-                <Text style={styles.stickerText}>MOMENTS</Text>
-                <Text style={styles.stickerText}>BIGGER</Text>
-                <Text style={styles.stickerText}>STORIES</Text>
-                <View style={styles.stickerUnderline} />
-              </View>
-            </View>
-
-            <Text style={[styles.heroSubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-              Connect your camera and we&apos;ll find your latest photos.
-            </Text>
-          </View>
-
-          {/* ── 3. CAMERA HERO 3D CARD ── */}
-          <View style={styles.cameraHeroContainer}>
-            {/* Go to Gallery pill button */}
-            <TouchableOpacity
-              style={[
-                styles.galleryPillButton,
-                {
-                  backgroundColor: isDark ? 'rgba(255, 107, 74, 0.16)' : '#FCEEE8',
-                  borderColor: isDark ? 'rgba(255, 107, 74, 0.35)' : '#F6C5B8',
-                },
-              ]}
-              onPress={handleGoToGallery}
-              activeOpacity={0.75}
-              accessibilityRole="button"
-              accessibilityLabel="Go to Gallery"
-              accessibilityHint="Navigate directly to the photo gallery for this event"
-            >
-              <ImageIcon
-                size={14}
-                color={isDark ? '#FF8A65' : '#161616'}
-                strokeWidth={2}
-                style={styles.galleryPillIconLeft}
-              />
-              <Text style={[styles.galleryPillText, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                Go to Gallery
-              </Text>
-              <ChevronRight
-                size={14}
-                color={isDark ? '#FF8A65' : '#161616'}
-                strokeWidth={2.2}
-                style={styles.galleryPillIconRight}
-              />
-            </TouchableOpacity>
-            {/* Background Circular Coral Glow behind camera */}
-            <View style={styles.cameraGlowDisc} />
-
-            {/* Decorative Geometric Neo-Brutalist Shapes */}
-            <View pointerEvents="none" style={styles.geoPinkTriangle}>
-              <Svg width={28} height={28} viewBox="0 0 32 32">
-                <Polygon
-                  points="16,2 30,28 2,28"
-                  fill="#FF85A2"
-                  stroke="#161616"
-                  strokeWidth="2"
-                  strokeLinejoin="round"
+          {isNotFound && errorMessage === null ? (
+            /* ── CAMERA NOT FOUND STATE ── */
+            <View style={styles.notFoundContainer}>
+              {/* Not Found Illustration */}
+              <View style={styles.notFoundIllustrationContainer}>
+                <Image
+                  source={CAMERA_NOT_FOUND_IMAGE}
+                  style={styles.notFoundIllustration}
+                  resizeMode="contain"
+                  accessibilityLabel="Camera not found illustration"
                 />
-              </Svg>
-            </View>
+              </View>
 
-            <View pointerEvents="none" style={styles.geoYellowStar}>
-              <SparkleStarSvg size={24} color="#F5C242" opacity={0.9} />
-            </View>
+              {/* Headline & Explanation */}
+              <Text style={[styles.notFoundTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                Camera Not Found<Text style={{ color: '#FF6B4A' }}>.</Text>
+              </Text>
+              <Text style={[styles.notFoundSubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                We couldn&apos;t find your camera or USB connection. Check that your camera is
+                powered on and the USB cable is securely connected, then try again.
+              </Text>
 
-            {/* Main 3D Camera Hero Asset */}
-            <Image
-              source={CAMERA_HERO_IMAGE}
-              style={styles.cameraHeroImage}
-              resizeMode="contain"
-              accessibilityLabel="3D Camera with wedding instant photo print"
-            />
-          </View>
-
-          {/* ── 4. CONNECTION MODE SELECTOR (WI-FI vs USB-C) ── */}
-          <View style={styles.modeSelectorRow}>
-            {/* Wi-Fi Card (Shows "Coming Soon" popup on press) */}
-            <Pressable
-              onPress={handleSelectWifi}
-              style={styles.modeCardWrapper}
-              accessibilityRole="button"
-              accessibilityLabel="Wi-Fi Connection Mode. Available soon"
-            >
-              {({ pressed }) => (
-                <View style={styles.cardShadowContainer}>
-                  {/* Neo-brutalist tactile hard shadow underlay */}
-                  <View
-                    style={[
-                      styles.cardHardShadow,
-                      {
-                        top: pressed ? 1 : 3,
-                        left: pressed ? 1 : 3,
-                        right: pressed ? -1 : -3,
-                        bottom: pressed ? -1 : -3,
-                      },
-                    ]}
-                  />
-
-                  {/* Card Face */}
-                  <View
-                    style={[
-                      styles.modeCardFace,
-                      {
-                        backgroundColor: isDark ? '#1A1A1E' : 'rgba(255, 253, 251, 0.9)',
-                        borderColor: isDark ? '#2E2E36' : '#161616',
-                        transform: [
-                          { translateY: pressed ? 2 : 0 },
-                          { translateX: pressed ? 2 : 0 },
-                        ],
-                      },
-                    ]}
+              {/* Troubleshooting Tips Card */}
+              <View
+                style={[
+                  styles.troubleshootCard,
+                  {
+                    backgroundColor: isDark ? '#201918' : '#FFE6DC',
+                    borderColor: isDark ? '#2E2E36' : '#161616',
+                  },
+                ]}
+              >
+                <View style={styles.troubleshootHeaderRow}>
+                  <View style={styles.infoBadgeCircle}>
+                    <Text style={styles.infoBadgeText}>i</Text>
+                  </View>
+                  <Text
+                    style={[styles.troubleshootTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
                   >
-                    {/* Top Row: 3D Wi-Fi Logo slot + "SOON" Pill Badge */}
-                    <View style={styles.modeCardTopRow}>
-                      <View style={styles.modeIconSlot}>
-                        <Image
-                          source={WIFI_3D_ICON}
-                          style={styles.mode3DIconWifi}
-                          resizeMode="contain"
-                        />
-                      </View>
+                    Troubleshooting tips
+                  </Text>
+                </View>
 
-                      <View
-                        style={[
-                          styles.soonPillBadge,
-                          {
-                            backgroundColor: isDark ? '#2E201B' : '#FFEAE3',
-                            borderColor: '#FF6B4A',
-                          },
-                        ]}
-                      >
-                        <Text style={styles.soonPillText}>SOON</Text>
-                      </View>
+                <View style={styles.troubleshootList}>
+                  <View style={styles.troubleshootItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
                     </View>
+                    <Text
+                      style={[
+                        styles.troubleshootItemText,
+                        { color: isDark ? '#D4D4D8' : '#161616' },
+                      ]}
+                    >
+                      Turn the camera on.
+                    </Text>
+                  </View>
 
-                    {/* Text Content */}
-                    <View style={styles.modeTextContent}>
-                      <Text
-                        style={[
-                          styles.modeTitle,
-                          {
-                            color: isDark ? '#F4F4F5' : '#161616',
-                          },
-                        ]}
-                      >
-                        Wi-Fi
-                      </Text>
-
-                      <Text
-                        style={[
-                          styles.modeSubtitle,
-                          {
-                            color: isDark ? '#A1A1AA' : '#7A7571',
-                          },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        Connect wirelessly
-                      </Text>
-
-                      <Text
-                        style={[
-                          styles.modeTag,
-                          {
-                            color: isDark ? '#FF8C73' : '#FF6B4A',
-                          },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        Available soon
-                      </Text>
+                  <View style={styles.troubleshootItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
                     </View>
+                    <Text
+                      style={[
+                        styles.troubleshootItemText,
+                        { color: isDark ? '#D4D4D8' : '#161616' },
+                      ]}
+                    >
+                      Check that the USB cable is connected securely.
+                    </Text>
+                  </View>
+
+                  <View style={styles.troubleshootItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                    </View>
+                    <Text
+                      style={[
+                        styles.troubleshootItemText,
+                        { color: isDark ? '#D4D4D8' : '#161616' },
+                      ]}
+                    >
+                      Make sure the camera uses the supported PC Remote USB mode.
+                    </Text>
                   </View>
                 </View>
-              )}
-            </Pressable>
+              </View>
 
-            {/* USB-C Card (Default Selected) */}
-            <Pressable
-              onPress={() => setConnectionMode('usbc')}
-              style={styles.modeCardWrapper}
-              accessibilityRole="radio"
-              accessibilityState={{ checked: connectionMode === 'usbc' }}
-              accessibilityLabel="USB-C Connection Mode. Connect directly. Stable & reliable"
-            >
-              {({ pressed }) => (
-                <View style={styles.cardShadowContainer}>
-                  {/* Neo-brutalist tactile hard shadow underlay */}
-                  <View
-                    style={[
-                      styles.cardHardShadow,
+              {/* Primary Action Button: "Try Again" */}
+              <Pressable
+                onPress={handleSearchCamera}
+                disabled={isSearching}
+                accessibilityRole="button"
+                accessibilityLabel={isSearching ? 'Searching for your camera' : 'Try Again'}
+                style={({ pressed }) => [
+                  styles.ctaButtonWrapper,
+                  {
+                    transform: [
                       {
-                        top: pressed ? 1 : 3,
-                        left: pressed ? 1 : 3,
-                        right: pressed ? -1 : -3,
-                        bottom: pressed ? -1 : -3,
+                        translateY: pressed && !isSearching ? 2 : 0,
                       },
-                    ]}
-                  />
-
-                  {/* Card Face */}
-                  <View
-                    style={[
-                      styles.modeCardFace,
-                      {
-                        backgroundColor:
-                          connectionMode === 'usbc'
-                            ? isDark
-                              ? '#FF6B4A'
-                              : '#FF7D5C'
-                            : isDark
-                              ? '#1A1A1E'
-                              : 'rgba(255, 253, 251, 0.9)',
-                        borderColor: isDark ? '#2E2E36' : '#161616',
-                        transform: [
-                          { translateY: pressed ? 2 : 0 },
-                          { translateX: pressed ? 2 : 0 },
-                        ],
-                      },
-                    ]}
-                  >
-                    {/* Top Row: 3D USB-C Cable slot + Check/Radio Indicator */}
-                    <View style={styles.modeCardTopRow}>
-                      <View style={styles.modeIconSlot}>
-                        <Image
-                          source={USBC_3D_ICON}
-                          style={styles.mode3DIconUsbc}
-                          resizeMode="contain"
-                        />
-                      </View>
-
-                      {connectionMode === 'usbc' ? (
-                        <View style={styles.modeSelectedBadge}>
-                          <Check size={13} color="#FFFFFF" strokeWidth={3} />
+                    ],
+                  },
+                ]}
+              >
+                {({ pressed }) => (
+                  <View style={styles.ctaButtonContainer}>
+                    <View
+                      style={[
+                        styles.ctaSearhShadowLayer,
+                        {
+                          top: pressed && !isSearching ? 2 : 6,
+                          left: 0,
+                          right: 0,
+                          bottom: pressed && !isSearching ? -2 : -6,
+                        },
+                      ]}
+                    />
+                    <Animated.View
+                      style={[
+                        styles.ctaButtonFace,
+                        {
+                          transform: [{ scale: pulseAnimRef.current }],
+                        },
+                      ]}
+                    >
+                      {isSearching ? (
+                        <View style={styles.searchingRow}>
+                          <ActivityIndicator size="small" color="#FF6B4A" />
+                          <Text style={styles.ctaButtonText}>Searching for your camera...</Text>
                         </View>
                       ) : (
-                        <View
-                          style={[
-                            styles.modeUnselectedCircle,
-                            { borderColor: isDark ? '#71717A' : '#161616' },
-                          ]}
-                        />
+                        <>
+                          <Text style={styles.ctaButtonText}>Try Again</Text>
+                          <ArrowRight
+                            size={20}
+                            color="#FFFFFF"
+                            strokeWidth={2.3}
+                            style={{ marginLeft: 6 }}
+                          />
+                        </>
                       )}
-                    </View>
+                    </Animated.View>
+                  </View>
+                )}
+              </Pressable>
 
-                    {/* Text Content */}
-                    <View style={styles.modeTextContent}>
-                      <Text
-                        style={[
-                          styles.modeTitle,
-                          {
-                            color:
-                              connectionMode === 'usbc'
-                                ? '#161616'
-                                : isDark
-                                  ? '#F4F4F5'
-                                  : '#161616',
-                          },
-                        ]}
-                      >
-                        USB-C
-                      </Text>
+              {/* Diagnostic Console Button */}
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => setIsDiagnosticVisible(true)}
+                style={[
+                  styles.diagTriggerBtn,
+                  {
+                    backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
+                    borderColor: isDark ? '#38BDF8' : '#2563EB',
+                  },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Open Camera Diagnostic Console"
+              >
+                <Terminal size={15} color={isDark ? '#38BDF8' : '#2563EB'} strokeWidth={2.2} />
+                <Text style={[styles.diagTriggerText, { color: isDark ? '#38BDF8' : '#2563EB' }]}>
+                  Open Camera Diagnostic Console
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              {/* ── 2. HERO HEADLINE & STICKER ── */}
+              <View style={styles.heroSection}>
+                <View style={styles.heroTitleRow}>
+                  <Text style={[styles.heroHeadline, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Connect{'\n'}your camera<Text style={{ color: '#FF6B4A' }}>.</Text>
+                  </Text>
 
-                      <Text
-                        style={[
-                          styles.modeSubtitle,
-                          {
-                            color:
-                              connectionMode === 'usbc'
-                                ? '#161616'
-                                : isDark
-                                  ? '#A1A1AA'
-                                  : '#7A7571',
-                          },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        Connect directly
-                      </Text>
-
-                      <Text
-                        style={[
-                          styles.modeTag,
-                          {
-                            color:
-                              connectionMode === 'usbc'
-                                ? '#4A1D13'
-                                : isDark
-                                  ? '#71717A'
-                                  : '#8B847D',
-                          },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        Stable & reliable
-                      </Text>
-                    </View>
+                  {/* Angled Mono Sticker Badge */}
+                  <View style={styles.stickerBadge}>
+                    <Text style={styles.stickerText}>SAME</Text>
+                    <Text style={styles.stickerText}>MOMENTS</Text>
+                    <Text style={styles.stickerText}>BIGGER</Text>
+                    <Text style={styles.stickerText}>STORIES</Text>
+                    <View style={styles.stickerUnderline} />
                   </View>
                 </View>
-              )}
-            </Pressable>
-          </View>
 
-          {/* ── 5. READINESS CHECKLIST CARD ── */}
-          <View
-            style={[
-              styles.checklistCard,
-              {
-                backgroundColor: isDark ? '#201918' : '#FFE6DC',
-                borderColor: isDark ? '#2E2E36' : '#161616',
-              },
-            ]}
-          >
-            {/* Top Row: Info Icon + Headline + Tagline */}
-            <View style={styles.checklistHeaderRow}>
-              <View style={styles.checkHeaderLeft}>
-                <View style={styles.infoBadgeCircle}>
-                  <Text style={styles.infoBadgeText}>i</Text>
-                </View>
-                <Text style={[styles.checklistTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
-                  Make sure your camera is ready
+                <Text style={[styles.heroSubtext, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
+                  Connect your camera and we&apos;ll find your latest photos.
                 </Text>
               </View>
 
-              {/* Right Vertical Tagline */}
-              <View style={styles.checklistSticker}>
-                <Text style={styles.checklistStickerText}>GOOD</Text>
-                <Text style={styles.checklistStickerText}>PHOTOS</Text>
-                <Text style={styles.checklistStickerText}>HAPPEN</Text>
-                <Text style={styles.checklistStickerText}>TOGETHER</Text>
-                <View style={styles.checklistStickerUnderline} />
-              </View>
-            </View>
-
-            {/* Checklist Items */}
-            <View style={styles.checklistItemsList}>
-              <View style={styles.checklistItem}>
-                <View style={styles.checkBullet}>
-                  <Check size={11} color="#FFFFFF" strokeWidth={3} />
-                </View>
-                <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
-                  Turn on your camera
-                </Text>
-              </View>
-
-              <View style={styles.checklistItem}>
-                <View style={styles.checkBullet}>
-                  <Check size={11} color="#FFFFFF" strokeWidth={3} />
-                </View>
-                <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
-                  Enable Wi-Fi (or connect via USB-C)
-                </Text>
-              </View>
-
-              <View style={styles.checklistItem}>
-                <View style={styles.checkBullet}>
-                  <Check size={11} color="#FFFFFF" strokeWidth={3} />
-                </View>
-                <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
-                  Keep your camera nearby
-                </Text>
-              </View>
-
-              <View style={styles.checklistItem}>
-                <View style={styles.checkBullet}>
-                  <Check size={11} color="#FFFFFF" strokeWidth={3} />
-                </View>
-                <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
-                  Sony settings: PC Remote &gt; Save Dest = &quot;PC+Camera&quot;
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          {/* ── DIAGNOSTIC CONSOLE BUTTON ── */}
-          <TouchableOpacity
-            activeOpacity={0.8}
-            onPress={() => setIsDiagnosticVisible(true)}
-            style={[
-              styles.diagTriggerBtn,
-              {
-                backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
-                borderColor: isDark ? '#38BDF8' : '#2563EB',
-              },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Open Camera Diagnostic Console"
-          >
-            <Terminal size={15} color={isDark ? '#38BDF8' : '#2563EB'} strokeWidth={2.2} />
-            <Text style={[styles.diagTriggerText, { color: isDark ? '#38BDF8' : '#2563EB' }]}>
-              Open Camera Diagnostic Console
-            </Text>
-          </TouchableOpacity>
-
-          {/* ── 6. PRIMARY CTA BUTTON ("Search for Camera") ── */}
-          <Pressable
-            onPress={handleSearchCamera}
-            disabled={isSearching}
-            accessibilityRole="button"
-            accessibilityLabel="Search for Camera"
-            style={({ pressed }) => [
-              styles.ctaButtonWrapper,
-              {
-                transform: [
-                  {
-                    translateY: pressed && !isSearching ? 2 : 0,
-                  },
-                ],
-              },
-            ]}
-          >
-            {({ pressed }) => (
-              <View style={styles.ctaButtonContainer}>
-                {/* Tactile Coral Shadow Layer Underneath (matching SelectEventScreen Continue button) */}
-                <View
+              {/* ── 3. CAMERA HERO 3D CARD ── */}
+              <View style={styles.cameraHeroContainer}>
+                {/* Go to Gallery pill button */}
+                <TouchableOpacity
                   style={[
-                    styles.ctaSearhShadowLayer,
+                    styles.galleryPillButton,
                     {
-                      top: pressed && !isSearching ? 2 : 6,
-                      left: 0,
-                      right: 0,
-                      bottom: pressed && !isSearching ? -2 : -6,
+                      backgroundColor: isDark ? 'rgba(255, 107, 74, 0.16)' : '#FCEEE8',
+                      borderColor: isDark ? 'rgba(255, 107, 74, 0.35)' : '#F6C5B8',
                     },
                   ]}
-                />
-
-                {/* Main Black Button Face */}
-                <Animated.View
-                  style={[
-                    styles.ctaButtonFace,
-                    {
-                      transform: [{ scale: pulseAnimRef.current }],
-                    },
-                  ]}
+                  onPress={handleGoToGallery}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel="Go to Gallery"
+                  accessibilityHint="Navigate directly to the photo gallery for this event"
                 >
-                  {isSearching ? (
-                    <View style={styles.searchingRow}>
-                      <ActivityIndicator size="small" color="#FF6B4A" />
-                      <Text style={styles.ctaButtonText}>Searching for Camera...</Text>
-                    </View>
-                  ) : (
-                    <>
-                      <Text style={styles.ctaButtonText}>Search for Camera</Text>
-                      <ArrowRight
-                        size={20}
-                        color="#FFFFFF"
-                        strokeWidth={2.3}
-                        style={{ marginLeft: 6 }}
-                      />
-                    </>
-                  )}
-                </Animated.View>
+                  <ImageIcon
+                    size={14}
+                    color={isDark ? '#FF8A65' : '#161616'}
+                    strokeWidth={2}
+                    style={styles.galleryPillIconLeft}
+                  />
+                  <Text style={[styles.galleryPillText, { color: isDark ? '#F4F4F5' : '#161616' }]}>
+                    Go to Gallery
+                  </Text>
+                  <ChevronRight
+                    size={14}
+                    color={isDark ? '#FF8A65' : '#161616'}
+                    strokeWidth={2.2}
+                    style={styles.galleryPillIconRight}
+                  />
+                </TouchableOpacity>
+                {/* Background Circular Coral Glow behind camera */}
+                <View style={styles.cameraGlowDisc} />
+
+                {/* Decorative Geometric Neo-Brutalist Shapes */}
+                <View pointerEvents="none" style={styles.geoPinkTriangle}>
+                  <Svg width={28} height={28} viewBox="0 0 32 32">
+                    <Polygon
+                      points="16,2 30,28 2,28"
+                      fill="#FF85A2"
+                      stroke="#161616"
+                      strokeWidth="2"
+                      strokeLinejoin="round"
+                    />
+                  </Svg>
+                </View>
+
+                <View pointerEvents="none" style={styles.geoYellowStar}>
+                  <SparkleStarSvg size={24} color="#F5C242" opacity={0.9} />
+                </View>
+
+                {/* Main 3D Camera Hero Asset */}
+                <Image
+                  source={CAMERA_HERO_IMAGE}
+                  style={styles.cameraHeroImage}
+                  resizeMode="contain"
+                  accessibilityLabel="3D Camera with wedding instant photo print"
+                />
               </View>
-            )}
-          </Pressable>
+
+              {/* ── 4. CONNECTION MODE SELECTOR (WI-FI vs USB-C) ── */}
+              <View style={styles.modeSelectorRow}>
+                {/* Wi-Fi Card (Shows "Coming Soon" popup on press) */}
+                <Pressable
+                  onPress={handleSelectWifi}
+                  style={styles.modeCardWrapper}
+                  accessibilityRole="button"
+                  accessibilityLabel="Wi-Fi Connection Mode. Available soon"
+                >
+                  {({ pressed }) => (
+                    <View style={styles.cardShadowContainer}>
+                      {/* Neo-brutalist tactile hard shadow underlay */}
+                      <View
+                        style={[
+                          styles.cardHardShadow,
+                          {
+                            top: pressed ? 1 : 3,
+                            left: pressed ? 1 : 3,
+                            right: pressed ? -1 : -3,
+                            bottom: pressed ? -1 : -3,
+                          },
+                        ]}
+                      />
+
+                      {/* Card Face */}
+                      <View
+                        style={[
+                          styles.modeCardFace,
+                          {
+                            backgroundColor: isDark ? '#1A1A1E' : 'rgba(255, 253, 251, 0.9)',
+                            borderColor: isDark ? '#2E2E36' : '#161616',
+                            transform: [
+                              { translateY: pressed ? 2 : 0 },
+                              { translateX: pressed ? 2 : 0 },
+                            ],
+                          },
+                        ]}
+                      >
+                        {/* Top Row: 3D Wi-Fi Logo slot + "SOON" Pill Badge */}
+                        <View style={styles.modeCardTopRow}>
+                          <View style={styles.modeIconSlot}>
+                            <Image
+                              source={WIFI_3D_ICON}
+                              style={styles.mode3DIconWifi}
+                              resizeMode="contain"
+                            />
+                          </View>
+
+                          <View
+                            style={[
+                              styles.soonPillBadge,
+                              {
+                                backgroundColor: isDark ? '#2E201B' : '#FFEAE3',
+                                borderColor: '#FF6B4A',
+                              },
+                            ]}
+                          >
+                            <Text style={styles.soonPillText}>SOON</Text>
+                          </View>
+                        </View>
+
+                        {/* Text Content */}
+                        <View style={styles.modeTextContent}>
+                          <Text
+                            style={[
+                              styles.modeTitle,
+                              {
+                                color: isDark ? '#F4F4F5' : '#161616',
+                              },
+                            ]}
+                          >
+                            Wi-Fi
+                          </Text>
+
+                          <Text
+                            style={[
+                              styles.modeSubtitle,
+                              {
+                                color: isDark ? '#A1A1AA' : '#7A7571',
+                              },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            Connect wirelessly
+                          </Text>
+
+                          <Text
+                            style={[
+                              styles.modeTag,
+                              {
+                                color: isDark ? '#FF8C73' : '#FF6B4A',
+                              },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            Available soon
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  )}
+                </Pressable>
+
+                {/* USB-C Card (Default Selected) */}
+                <Pressable
+                  onPress={() => setConnectionMode('usbc')}
+                  style={styles.modeCardWrapper}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: connectionMode === 'usbc' }}
+                  accessibilityLabel="USB-C Connection Mode. Connect directly. Stable & reliable"
+                >
+                  {({ pressed }) => (
+                    <View style={styles.cardShadowContainer}>
+                      {/* Neo-brutalist tactile hard shadow underlay */}
+                      <View
+                        style={[
+                          styles.cardHardShadow,
+                          {
+                            top: pressed ? 1 : 3,
+                            left: pressed ? 1 : 3,
+                            right: pressed ? -1 : -3,
+                            bottom: pressed ? -1 : -3,
+                          },
+                        ]}
+                      />
+
+                      {/* Card Face */}
+                      <View
+                        style={[
+                          styles.modeCardFace,
+                          {
+                            backgroundColor:
+                              connectionMode === 'usbc'
+                                ? isDark
+                                  ? '#FF6B4A'
+                                  : '#FF7D5C'
+                                : isDark
+                                  ? '#1A1A1E'
+                                  : 'rgba(255, 253, 251, 0.9)',
+                            borderColor: isDark ? '#2E2E36' : '#161616',
+                            transform: [
+                              { translateY: pressed ? 2 : 0 },
+                              { translateX: pressed ? 2 : 0 },
+                            ],
+                          },
+                        ]}
+                      >
+                        {/* Top Row: 3D USB-C Cable slot + Check/Radio Indicator */}
+                        <View style={styles.modeCardTopRow}>
+                          <View style={styles.modeIconSlot}>
+                            <Image
+                              source={USBC_3D_ICON}
+                              style={styles.mode3DIconUsbc}
+                              resizeMode="contain"
+                            />
+                          </View>
+
+                          {connectionMode === 'usbc' ? (
+                            <View style={styles.modeSelectedBadge}>
+                              <Check size={13} color="#FFFFFF" strokeWidth={3} />
+                            </View>
+                          ) : (
+                            <View
+                              style={[
+                                styles.modeUnselectedCircle,
+                                { borderColor: isDark ? '#71717A' : '#161616' },
+                              ]}
+                            />
+                          )}
+                        </View>
+
+                        {/* Text Content */}
+                        <View style={styles.modeTextContent}>
+                          <Text
+                            style={[
+                              styles.modeTitle,
+                              {
+                                color:
+                                  connectionMode === 'usbc'
+                                    ? '#161616'
+                                    : isDark
+                                      ? '#F4F4F5'
+                                      : '#161616',
+                              },
+                            ]}
+                          >
+                            USB-C
+                          </Text>
+
+                          <Text
+                            style={[
+                              styles.modeSubtitle,
+                              {
+                                color:
+                                  connectionMode === 'usbc'
+                                    ? '#161616'
+                                    : isDark
+                                      ? '#A1A1AA'
+                                      : '#7A7571',
+                              },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            Connect directly
+                          </Text>
+
+                          <Text
+                            style={[
+                              styles.modeTag,
+                              {
+                                color:
+                                  connectionMode === 'usbc'
+                                    ? '#4A1D13'
+                                    : isDark
+                                      ? '#71717A'
+                                      : '#8B847D',
+                              },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            Stable & reliable
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  )}
+                </Pressable>
+              </View>
+
+              {/* ── 5. READINESS CHECKLIST CARD ── */}
+              <View
+                style={[
+                  styles.checklistCard,
+                  {
+                    backgroundColor: isDark ? '#201918' : '#FFE6DC',
+                    borderColor: isDark ? '#2E2E36' : '#161616',
+                  },
+                ]}
+              >
+                {/* Top Row: Info Icon + Headline + Tagline */}
+                <View style={styles.checklistHeaderRow}>
+                  <View style={styles.checkHeaderLeft}>
+                    <View style={styles.infoBadgeCircle}>
+                      <Text style={styles.infoBadgeText}>i</Text>
+                    </View>
+                    <Text
+                      style={[styles.checklistTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                    >
+                      Make sure your camera is ready
+                    </Text>
+                  </View>
+
+                  {/* Right Vertical Tagline */}
+                  <View style={styles.checklistSticker}>
+                    <Text style={styles.checklistStickerText}>GOOD</Text>
+                    <Text style={styles.checklistStickerText}>PHOTOS</Text>
+                    <Text style={styles.checklistStickerText}>HAPPEN</Text>
+                    <Text style={styles.checklistStickerText}>TOGETHER</Text>
+                    <View style={styles.checklistStickerUnderline} />
+                  </View>
+                </View>
+
+                {/* Checklist Items */}
+                <View style={styles.checklistItemsList}>
+                  <View style={styles.checklistItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                    </View>
+                    <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
+                      Turn on your camera
+                    </Text>
+                  </View>
+
+                  <View style={styles.checklistItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                    </View>
+                    <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
+                      Enable Wi-Fi (or connect via USB-C)
+                    </Text>
+                  </View>
+
+                  <View style={styles.checklistItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                    </View>
+                    <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
+                      Keep your camera nearby
+                    </Text>
+                  </View>
+
+                  <View style={styles.checklistItem}>
+                    <View style={styles.checkBullet}>
+                      <Check size={11} color="#FFFFFF" strokeWidth={3} />
+                    </View>
+                    <Text style={[styles.checkItemText, { color: isDark ? '#D4D4D8' : '#161616' }]}>
+                      Sony settings: PC Remote &gt; Save Dest = &quot;PC+Camera&quot;
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* ── DIAGNOSTIC CONSOLE BUTTON ── */}
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => setIsDiagnosticVisible(true)}
+                style={[
+                  styles.diagTriggerBtn,
+                  {
+                    backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
+                    borderColor: isDark ? '#38BDF8' : '#2563EB',
+                  },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Open Camera Diagnostic Console"
+              >
+                <Terminal size={15} color={isDark ? '#38BDF8' : '#2563EB'} strokeWidth={2.2} />
+                <Text style={[styles.diagTriggerText, { color: isDark ? '#38BDF8' : '#2563EB' }]}>
+                  Open Camera Diagnostic Console
+                </Text>
+              </TouchableOpacity>
+
+              {/* ── 6. PRIMARY CTA BUTTON ("Search for Camera") ── */}
+              <Pressable
+                onPress={handleSearchCamera}
+                disabled={isSearching}
+                accessibilityRole="button"
+                accessibilityLabel={isSearching ? 'Searching for your camera' : 'Search for Camera'}
+                style={({ pressed }) => [
+                  styles.ctaButtonWrapper,
+                  {
+                    transform: [
+                      {
+                        translateY: pressed && !isSearching ? 2 : 0,
+                      },
+                    ],
+                  },
+                ]}
+              >
+                {({ pressed }) => (
+                  <View style={styles.ctaButtonContainer}>
+                    {/* Tactile Coral Shadow Layer Underneath (matching SelectEventScreen Continue button) */}
+                    <View
+                      style={[
+                        styles.ctaSearhShadowLayer,
+                        {
+                          top: pressed && !isSearching ? 2 : 6,
+                          left: 0,
+                          right: 0,
+                          bottom: pressed && !isSearching ? -2 : -6,
+                        },
+                      ]}
+                    />
+
+                    {/* Main Black Button Face */}
+                    <Animated.View
+                      style={[
+                        styles.ctaButtonFace,
+                        {
+                          transform: [{ scale: pulseAnimRef.current }],
+                        },
+                      ]}
+                    >
+                      {isSearching ? (
+                        <View style={styles.searchingRow}>
+                          <ActivityIndicator size="small" color="#FF6B4A" />
+                          <Text style={styles.ctaButtonText}>Searching for your camera...</Text>
+                        </View>
+                      ) : (
+                        <>
+                          <Text style={styles.ctaButtonText}>Search for Camera</Text>
+                          <ArrowRight
+                            size={20}
+                            color="#FFFFFF"
+                            strokeWidth={2.3}
+                            style={{ marginLeft: 6 }}
+                          />
+                        </>
+                      )}
+                    </Animated.View>
+                  </View>
+                )}
+              </Pressable>
+            </>
+          )}
 
           {/* ── 7. ERROR / DISCONNECTED BANNER (visible only on error/disconnect) ── */}
           {errorMessage !== null && (
@@ -1725,5 +2034,72 @@ const styles = StyleSheet.create({
   diagTriggerText: {
     fontFamily: FONTS.plusJakartaSans.bold,
     fontSize: 13,
+  },
+
+  // ── Camera Not Found State Styles ──
+  notFoundContainer: {
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  notFoundIllustrationContainer: {
+    height: 200,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 10,
+  },
+  notFoundIllustration: {
+    width: '100%',
+    height: 195,
+  },
+  notFoundTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 28,
+    lineHeight: 34,
+    letterSpacing: -0.5,
+    marginBottom: 8,
+  },
+  notFoundSubtitle: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 13.5,
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  troubleshootCard: {
+    borderRadius: 20,
+    borderWidth: 1.5,
+    padding: 16,
+    marginBottom: 20,
+    shadowColor: '#161616',
+    shadowOffset: { width: 3, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 0,
+    elevation: 3,
+  },
+  troubleshootHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  troubleshootTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 15,
+    letterSpacing: -0.2,
+    flex: 1,
+  },
+  troubleshootList: {
+    gap: 10,
+  },
+  troubleshootItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  troubleshootItemText: {
+    fontFamily: FONTS.plusJakartaSans.medium,
+    fontSize: 13.5,
+    lineHeight: 18,
+    flex: 1,
   },
 });
