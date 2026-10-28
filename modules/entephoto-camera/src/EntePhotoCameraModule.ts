@@ -68,6 +68,25 @@ export type PhotoTransferErrorEvent = {
  * Emitted when a camera file is intentionally skipped (e.g., unsupported format like RAW/ARW).
  * The camera connection remains active and session is not affected.
  */
+export type StoredPhotoResult = {
+  id: string;
+  mediaId: number;
+  uri: string;
+  filename: string;
+  sizeBytes: number;
+  capturedAt: number;
+  mimeType: string;
+};
+
+export type StorageReadyResult = {
+  ready: boolean;
+  apiLevel: number;
+  isScopedStorage: boolean;
+  targetPath: string;
+  directoryCreated?: boolean;
+  error?: string;
+};
+
 export type PhotoSkippedEvent = {
   /** Original filename on camera (e.g. "DSC00001.ARW"). */
   filename: string;
@@ -101,6 +120,11 @@ export type CameraEvents = {
 };
 
 declare class EntePhotoCameraModule extends NativeModule<CameraEvents> {
+  // ── MediaStore & Storage methods ──────────────────────────────────────────
+  ensureStorageReady(): Promise<StorageReadyResult>;
+  queryStoredPhotos(relativeDir?: string | null): Promise<StoredPhotoResult[]>;
+  deleteStoredPhoto(uriString: string): Promise<boolean>;
+
   getStatus(): string;
   getConnectionState(): ConnectionState;
   startSearch(): void;

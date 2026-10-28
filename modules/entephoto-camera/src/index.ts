@@ -5,6 +5,8 @@ import EntePhotoCameraModule, {
   DiagnosticRecord,
   PhotoTransferErrorEvent,
   PhotoSkippedEvent,
+  StoredPhotoResult,
+  StorageReadyResult,
 } from './EntePhotoCameraModule';
 import { EventSubscription } from 'expo-modules-core';
 import { Platform, PermissionsAndroid } from 'react-native';
@@ -97,6 +99,27 @@ export function addPhotoSkippedListener(
   listener: (event: PhotoSkippedEvent) => void,
 ): EventSubscription {
   return EntePhotoCameraModule.addListener('onPhotoSkipped', listener);
+}
+
+// ── Storage and MediaStore APIs ────────────────────────────────────────────
+
+export async function ensureStorageReady(): Promise<StorageReadyResult> {
+  return (
+    EntePhotoCameraModule?.ensureStorageReady?.() ?? {
+      ready: true,
+      apiLevel: Platform.OS === 'android' ? (Platform.Version as number) : 0,
+      isScopedStorage: Platform.OS === 'android' && (Platform.Version as number) >= 29,
+      targetPath: 'DCIM/Entephoto/',
+    }
+  );
+}
+
+export async function queryStoredPhotos(relativeDir?: string | null): Promise<StoredPhotoResult[]> {
+  return EntePhotoCameraModule?.queryStoredPhotos?.(relativeDir ?? null) ?? [];
+}
+
+export async function deleteStoredPhoto(uriString: string): Promise<boolean> {
+  return EntePhotoCameraModule?.deleteStoredPhoto?.(uriString) ?? false;
 }
 
 // ── Diagnostic log APIs ────────────────────────────────────────────────────
@@ -223,6 +246,8 @@ export {
   DiagnosticRecord,
   PhotoTransferErrorEvent,
   PhotoSkippedEvent,
+  StoredPhotoResult,
+  StorageReadyResult,
 };
 
 export default EntePhotoCameraModule;

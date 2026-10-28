@@ -26,4 +26,7 @@ interface DownloadedFileDao {
 
     @Query("SELECT * FROM downloaded_files ORDER BY importedAt DESC LIMIT 200")
     suspend fun getRecentImports(): List<DownloadedFile>
+
+    @Query("DELETE FROM downloaded_files WHERE filename = :filename")
+    suspend fun deleteByFilename(filename: String): Int
 }

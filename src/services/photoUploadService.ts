@@ -261,6 +261,12 @@ export async function preparePhotoForUpload(
       console.log(
         `[photoUploadService] Skipped compression (≤4 MB JPEG): ${filename} (${finalSizeMb} MB)`,
       );
+      if (finalUploadUri.startsWith('content://')) {
+        const cachedUri = `${FileSystem.cacheDirectory}${filename}`;
+        await FileSystem.copyAsync({ from: finalUploadUri, to: cachedUri });
+        finalUploadUri = cachedUri;
+        tempUrisToCleanup.push(cachedUri);
+      }
     }
 
     // Cancellation check after file rename/move

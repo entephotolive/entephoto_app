@@ -1,6 +1,11 @@
 import { Platform } from 'react-native';
 import { Directory, File, type WatchEvent, type WatchSubscription } from 'expo-file-system';
-import { addPhotoSavedListener } from 'entephoto-camera';
+import {
+  addPhotoSavedListener,
+  ensureStorageReady,
+  queryStoredPhotos,
+  deleteStoredPhoto,
+} from 'entephoto-camera';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
 import { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH } from '@/config/photo.config';
 import { permissionCoordinator } from './permissionCoordinator';
@@ -86,6 +91,26 @@ export async function ensurePhotoDirectoryExists(silent: boolean = false): Promi
         return false;
       }
 
+      const apiLevel =
+        typeof Platform.Version === 'number'
+          ? Platform.Version
+          : parseInt(String(Platform.Version), 10);
+
+      // On Android 10+ (API 29+), Scoped Storage disallows raw POSIX mkdir / Directory.create()
+      // on public shared DCIM without SAF. Attempting dir.create() throws "Missing 'WRITE' permission".
+      // Under Scoped Storage, photos are written via MediaStore, which creates the directory dynamically.
+      if (apiLevel >= 29) {
+        const readiness = await ensureStorageReady();
+        if (!silent) {
+          console.log(
+            `[LocalPhotoService] Scoped storage ready for ${PHOTO_STORAGE_DISPLAY_PATH} (API ${apiLevel}):`,
+            readiness,
+          );
+        }
+        return readiness.ready;
+      }
+
+      // Android 9 and below (API <= 28): Direct filesystem creation is permitted
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
       if (!dir.exists) {
         dir.create({ intermediates: true });
@@ -332,7 +357,60 @@ export async function scanDcimEntephotoPhotos(
         throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
       }
 
-      // 2. Check if canonical directory exists (does NOT create it — Trigger 1 & 2 only)
+      const scannedPhotos: GalleryPhotoItem[] = [];
+
+      // 2. Query stored photos via native MediaStore bridge (Android 10+ and indexed MediaStore)
+      try {
+        const storedPhotos = await queryStoredPhotos(PHOTO_STORAGE_DISPLAY_PATH);
+        if (storedPhotos && storedPhotos.length > 0) {
+          for (let i = 0; i < storedPhotos.length; i++) {
+            const sp = storedPhotos[i];
+            const capturedAt = sp.capturedAt || Date.now();
+            const item: GalleryPhotoItem = {
+              id: `dcim-${sp.filename}`,
+              assetId: sp.id,
+              uri: sp.uri,
+              filename: sp.filename,
+              isRaw: isRawPhoto(sp.filename),
+              status: 'new',
+              selected: false,
+              timestamp: formatTime(capturedAt),
+              capturedAt,
+              dimensions: undefined,
+              aperture: undefined,
+              shutter: undefined,
+            };
+            scannedPhotos.push(item);
+          }
+        }
+      } catch (mediaStoreErr) {
+        console.warn(
+          '[LocalPhotoService] MediaStore query failed, falling back to directory check:',
+          mediaStoreErr,
+        );
+      }
+
+      // If MediaStore returned items, finalize and return
+      if (scannedPhotos.length > 0) {
+        if (!silent) {
+          console.log(
+            `[LocalPhotoService] MediaStore scan completed: ${scannedPhotos.length} photos (seq #${sequenceId}).`,
+          );
+        }
+        sortPhotosChronological(scannedPhotos);
+        (scannedPhotos as any).scanSequenceId = sequenceId;
+
+        cachedPhotosMap.clear();
+        for (const p of scannedPhotos) {
+          cachedPhotosMap.set(p.id, p);
+          if (p.uri) {
+            cachedPhotosMap.set(p.uri, p);
+          }
+        }
+        return scannedPhotos;
+      }
+
+      // 3. Fallback for legacy Android 9 or direct filesystem files
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
       if (!dir.exists) {
         if (!silent) {
@@ -354,8 +432,6 @@ export async function scanDcimEntephotoPhotos(
 
       // Yield after synchronous directory listing so UI can paint before per-file metadata extraction
       await new Promise<void>(resolve => setTimeout(resolve, 0));
-
-      const scannedPhotos: GalleryPhotoItem[] = [];
       let lastProgressEmitMs = 0;
       for (let i = 0; i < photoEntries.length; i++) {
         const file = photoEntries[i];
@@ -614,8 +690,33 @@ export function subscribeToDcimPhotos(
         console.log(`[LocalPhotoService] Camera photo saved event: ${event.filename}`);
         if (!isPhotoFile(event.filename)) return;
 
-        const targetFile = new File(event.uri);
-        handleFileUpsert(targetFile);
+        const now = Date.now();
+        const photoItem: GalleryPhotoItem = {
+          id: `dcim-${event.filename}`,
+          assetId: undefined,
+          uri: event.uri,
+          filename: event.filename,
+          isRaw: isRawPhoto(event.filename),
+          status: 'new',
+          selected: false,
+          timestamp: formatTime(now),
+          capturedAt: now,
+          dimensions: undefined,
+          aperture: undefined,
+          shutter: undefined,
+        };
+
+        const apply = () => {
+          cachedPhotosMap.set(photoItem.id, photoItem);
+          cachedPhotosMap.set(photoItem.uri, photoItem);
+          scheduleEmit();
+        };
+
+        if (isInitialScanInFlight) {
+          pendingInitialScanEvents.push(apply);
+        } else {
+          apply();
+        }
       });
     } catch (err) {
       console.warn('[LocalPhotoService] Failed to bind addPhotoSavedListener:', err);
@@ -691,12 +792,23 @@ export function subscribeToDcimPhotos(
  */
 export async function deleteLocalPhoto(fileUri: string): Promise<boolean> {
   try {
+    const filename = fileUri.split('/').pop() || '';
+    const photoId = `dcim-${filename}`;
+
+    if (Platform.OS === 'android') {
+      const deleted = await deleteStoredPhoto(fileUri);
+      if (deleted) {
+        console.log(`[LocalPhotoService] Successfully deleted via native MediaStore: ${fileUri}`);
+        cachedPhotosMap.delete(photoId);
+        cachedPhotosMap.delete(fileUri);
+        return true;
+      }
+    }
+
     const file = new File(fileUri);
     if (file.exists) {
       file.delete();
       console.log(`[LocalPhotoService] Successfully deleted file: ${fileUri}`);
-      const filename = file.name || fileUri.split('/').pop() || '';
-      const photoId = `dcim-${filename}`;
       cachedPhotosMap.delete(photoId);
       cachedPhotosMap.delete(fileUri);
       return true;

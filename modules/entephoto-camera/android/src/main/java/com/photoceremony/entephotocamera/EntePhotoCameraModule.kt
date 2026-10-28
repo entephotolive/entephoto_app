@@ -5,6 +5,14 @@ import com.photoceremony.entephotocamera.diagnostics.CameraDiagnosticLogger
 import com.photoceremony.entephotocamera.diagnostics.DiagnosticRecord
 import com.photoceremony.entephotocamera.notifications.NotificationHelper
 import com.photoceremony.entephotocamera.notifications.UploadForegroundService
+import android.content.ContentUris
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import com.photoceremony.entephotocamera.storage.ImportDatabase
+import kotlinx.coroutines.runBlocking
+import timber.log.Timber
+import java.io.File
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -198,6 +206,192 @@ class EntePhotoCameraModule : Module() {
         Function("getDiagnosticText") {
             CameraDiagnosticLogger.dumpText()
         }
+
+        // ── MediaStore & Storage bridge ──────────────────────────────────────
+
+        AsyncFunction("ensureStorageReady") {
+            val ctx = appContext.reactContext
+            val apiLevel = Build.VERSION.SDK_INT
+            val isScopedStorage = apiLevel >= Build.VERSION_CODES.Q
+            val result = mutableMapOf<String, Any>(
+                "ready" to true,
+                "apiLevel" to apiLevel,
+                "isScopedStorage" to isScopedStorage,
+                "targetPath" to "DCIM/Entephoto/"
+            )
+
+            if (!isScopedStorage && ctx != null) {
+                try {
+                    val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DCIM
+                    )
+                    val entephotoDir = File(dcimDir, "Entephoto")
+                    if (!entephotoDir.exists()) {
+                        val created = entephotoDir.mkdirs()
+                        result["directoryCreated"] = created
+                    } else {
+                        result["directoryCreated"] = false
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "EntePhotoCameraModule: legacy mkdir failed")
+                    result["ready"] = false
+                    result["error"] = e.message ?: "Failed to create legacy directory"
+                }
+            }
+            result
+        }
+
+        AsyncFunction("queryStoredPhotos") { relativeDir: String? ->
+            val photos = mutableListOf<Map<String, Any?>>()
+            val resolver = appContext.reactContext?.contentResolver ?: return@AsyncFunction photos
+
+            val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                arrayOf(
+                    MediaStore.Images.Media._ID,
+                    MediaStore.Images.Media.DISPLAY_NAME,
+                    MediaStore.Images.Media.SIZE,
+                    MediaStore.Images.Media.DATE_TAKEN,
+                    MediaStore.Images.Media.DATE_ADDED,
+                    MediaStore.Images.Media.MIME_TYPE,
+                    MediaStore.Images.Media.RELATIVE_PATH
+                )
+            } else {
+                arrayOf(
+                    MediaStore.Images.Media._ID,
+                    MediaStore.Images.Media.DISPLAY_NAME,
+                    MediaStore.Images.Media.SIZE,
+                    MediaStore.Images.Media.DATE_TAKEN,
+                    MediaStore.Images.Media.DATE_ADDED,
+                    MediaStore.Images.Media.MIME_TYPE,
+                    MediaStore.Images.Media.DATA
+                )
+            }
+
+            val targetDir = relativeDir?.trimEnd('/') ?: "DCIM/Entephoto"
+            val (selection, selectionArgs) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                Pair(
+                    "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?",
+                    arrayOf("$targetDir%", "Entephoto")
+                )
+            } else {
+                Pair(
+                    "${MediaStore.Images.Media.DATA} LIKE ? OR ${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?",
+                    arrayOf("%/$targetDir/%", "Entephoto")
+                )
+            }
+
+            val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC, ${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+            try {
+                resolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    sortOrder
+                )?.use { cursor ->
+                    val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                    val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
+                    val dateTakenColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                    val dateAddedColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+                    val mimeColumn = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(idColumn)
+                        val name = cursor.getString(nameColumn) ?: ("photo_" + id + ".jpg")
+                        val size = cursor.getLong(sizeColumn)
+                        val dateTaken = if (dateTakenColumn != -1 && !cursor.isNull(dateTakenColumn)) {
+                            cursor.getLong(dateTakenColumn)
+                        } else if (dateAddedColumn != -1 && !cursor.isNull(dateAddedColumn)) {
+                            cursor.getLong(dateAddedColumn) * 1000L
+                        } else {
+                            System.currentTimeMillis()
+                        }
+                        val mimeType = if (mimeColumn != -1 && !cursor.isNull(mimeColumn)) {
+                            cursor.getString(mimeColumn)
+                        } else {
+                            "image/jpeg"
+                        }
+                        val contentUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+
+                        photos.add(
+                            mapOf(
+                                "id" to id.toString(),
+                                "mediaId" to id,
+                                "uri" to contentUri.toString(),
+                                "filename" to name,
+                                "sizeBytes" to size,
+                                "capturedAt" to dateTaken,
+                                "mimeType" to mimeType
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "EntePhotoCameraModule: queryStoredPhotos failed")
+            }
+
+            photos
+        }
+
+        AsyncFunction("deleteStoredPhoto") { uriString: String ->
+            val ctx = appContext.reactContext ?: return@AsyncFunction false
+            var deleted = false
+            var filename: String? = null
+
+            try {
+                val uri = Uri.parse(uriString)
+                if (uri.scheme == "content") {
+                    ctx.contentResolver.query(
+                        uri,
+                        arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIdx = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                            if (nameIdx != -1) {
+                                filename = cursor.getString(nameIdx)
+                            }
+                        }
+                    }
+                    val rows = ctx.contentResolver.delete(uri, null, null)
+                    deleted = rows > 0
+                } else if (uri.scheme == "file" || uriString.startsWith("/")) {
+                    val filePath = if (uri.scheme == "file") uri.path ?: uriString else uriString
+                    val file = File(filePath)
+                    filename = file.name
+                    if (file.exists()) {
+                        deleted = file.delete()
+                    }
+                    try {
+                        ctx.contentResolver.delete(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            "${MediaStore.Images.Media.DATA} = ?",
+                            arrayOf(file.absolutePath)
+                        )
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "EntePhotoCameraModule: failed to delete stored photo " + uriString)
+            }
+
+            if (filename != null) {
+                try {
+                    val db = ImportDatabase.getInstance(ctx)
+                    runBlocking {
+                        db.downloadedFileDao().deleteByFilename(filename!!)
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "EntePhotoCameraModule: failed to purge Room database for " + filename)
+                }
+            }
+
+            deleted
+        }
+
 
         // ── Notification bridge ───────────────────────────────────────────────
 

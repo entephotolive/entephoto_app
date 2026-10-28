@@ -39,6 +39,7 @@ import {
 } from 'lucide-react-native';
 import { QRCodeView } from '@/components/QRCodeView';
 import { tryGenerateEventLiveQrUrl } from '@/utils/eventQr';
+import { qrExportService } from '@/services/qrExportService';
 import { useNavigation } from '@react-navigation/native';
 import { AppNavigationProp } from '@/navigation/types';
 import { Text } from '@/components/Text';
@@ -147,6 +148,7 @@ export const SelectEventScreen: React.FC = () => {
   const [isMenuVisible, setIsMenuVisible] = useState(false);
   const [selectedQrEvent, setSelectedQrEvent] = useState<EventModel | null>(null);
   const [isQrModalVisible, setIsQrModalVisible] = useState(false);
+  const [isExportingQr, setIsExportingQr] = useState(false);
   const isMenuActionRef = useRef(false);
 
   const handleOpenEventMenu = useCallback((event: EventModel) => {
@@ -174,10 +176,37 @@ export const SelectEventScreen: React.FC = () => {
     setIsQrModalVisible(false);
   }, []);
 
-  const handleDownloadQrCode = useCallback(() => {
-    // QR code downloading will be implemented in Step 3
-    Alert.alert('Download QR Code', 'QR code download feature will be available in the next step.');
-  }, []);
+  const handleDownloadQrCode = useCallback(async () => {
+    if (!selectedQrEvent || isExportingQr) return;
+    setIsExportingQr(true);
+    try {
+      const result = await qrExportService.downloadAndSaveEventQr(selectedQrEvent);
+      if (result.success) {
+        Alert.alert(
+          'QR Code Saved',
+          `The QR code for "${selectedQrEvent.title}" has been saved to your photo gallery.`,
+        );
+      } else if (result.permissionDenied) {
+        Alert.alert(
+          'Permission Required',
+          'Storage permission is required to save the QR code to your gallery. Please grant access in app settings.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Open Settings',
+              onPress: () => permissionCoordinator.openAppSettings(),
+            },
+          ],
+        );
+      } else {
+        Alert.alert('Download Failed', result.error || 'Failed to save QR code.');
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'An unexpected error occurred while saving.');
+    } finally {
+      setIsExportingQr(false);
+    }
+  }, [selectedQrEvent, isExportingQr]);
 
   // Compute QR URL dynamically from the selected QR event using Step 1 utility
   const qrUrlResult = useMemo(() => {
@@ -1210,17 +1239,25 @@ export const SelectEventScreen: React.FC = () => {
               <TouchableOpacity
                 activeOpacity={0.82}
                 onPress={handleDownloadQrCode}
+                disabled={isExportingQr}
                 style={[
                   styles.downloadQrBtn,
                   {
                     backgroundColor: isDark ? '#FF6B4A' : '#161616',
+                    opacity: isExportingQr ? 0.72 : 1,
                   },
                 ]}
                 accessibilityRole="button"
-                accessibilityLabel="Download QR Code"
+                accessibilityLabel={isExportingQr ? 'Saving QR code...' : 'Download QR Code'}
               >
-                <Download size={19} color="#FFFFFF" strokeWidth={2.4} />
-                <Text style={styles.downloadQrBtnText}>Download QR Code</Text>
+                {isExportingQr ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Download size={19} color="#FFFFFF" strokeWidth={2.4} />
+                )}
+                <Text style={styles.downloadQrBtnText}>
+                  {isExportingQr ? 'Saving QR Code...' : 'Download QR Code'}
+                </Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
