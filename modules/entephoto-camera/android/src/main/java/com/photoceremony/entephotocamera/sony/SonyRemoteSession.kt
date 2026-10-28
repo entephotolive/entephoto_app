@@ -482,7 +482,9 @@ class SonyRemoteSession(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
             "Entephoto"
         )
-        dir.mkdirs()
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw java.io.IOException("Failed to create photo storage directory: ${dir.absolutePath}")
+        }
         val dest = File(dir, filename)
 
         FileOutputStream(dest).use { os ->

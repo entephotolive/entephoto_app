@@ -1,8 +1,9 @@
-import { Platform, PermissionsAndroid } from 'react-native';
+import { Platform } from 'react-native';
 import { Directory, File, type WatchEvent, type WatchSubscription } from 'expo-file-system';
 import { addPhotoSavedListener } from 'entephoto-camera';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
 import { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH } from '@/config/photo.config';
+import { permissionCoordinator } from './permissionCoordinator';
 
 // ── Canonical Photo Directory on Android (synced with env) ────────────────────
 export const CANONICAL_DCIM_DIR_URI = PHOTO_STORAGE_DIR_URI;
@@ -150,24 +151,8 @@ function formatTime(epochMs: number): string {
  * Checks if storage permission is already granted without prompting the user.
  */
 async function checkStoragePermission(): Promise<boolean> {
-  if (Platform.OS !== 'android') {
-    return true;
-  }
-  try {
-    const apiLevel =
-      typeof Platform.Version === 'number'
-        ? Platform.Version
-        : parseInt(String(Platform.Version), 10);
-    const permission =
-      apiLevel >= 33
-        ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
-        : PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE;
-
-    return await PermissionsAndroid.check(permission);
-  } catch (error) {
-    console.error('[LocalPhotoService] Error checking storage permission:', error);
-    return false;
-  }
+  const status = await permissionCoordinator.checkPhotoPermission();
+  return status === 'granted' || status === 'limited';
 }
 
 /**
@@ -176,42 +161,8 @@ async function checkStoragePermission(): Promise<boolean> {
  * - Android 12 and below (API <= 32): READ_EXTERNAL_STORAGE
  */
 async function requestStoragePermission(): Promise<boolean> {
-  if (Platform.OS !== 'android') {
-    return true;
-  }
-
-  try {
-    const apiLevel =
-      typeof Platform.Version === 'number'
-        ? Platform.Version
-        : parseInt(String(Platform.Version), 10);
-    const permission =
-      apiLevel >= 33
-        ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
-        : PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE;
-
-    const hasPermission = await PermissionsAndroid.check(permission);
-    if (hasPermission) {
-      console.log(`[LocalPhotoService] Storage permission already granted (${permission})`);
-      return true;
-    }
-
-    console.log(`[LocalPhotoService] Requesting storage permission: ${permission}`);
-    const result = await PermissionsAndroid.request(permission, {
-      title: 'EntePhoto Storage Access',
-      message: `EntePhoto requires storage access to view and sync photos from your ${PHOTO_STORAGE_DISPLAY_PATH} folder.`,
-      buttonNeutral: 'Ask Me Later',
-      buttonNegative: 'Cancel',
-      buttonPositive: 'Grant Access',
-    });
-
-    const granted = result === PermissionsAndroid.RESULTS.GRANTED;
-    console.log(`[LocalPhotoService] Storage permission request result: ${result}`);
-    return granted;
-  } catch (error) {
-    console.error('[LocalPhotoService] Error requesting storage permission:', error);
-    return false;
-  }
+  const status = await permissionCoordinator.requestPhotoPermission();
+  return status === 'granted' || status === 'limited';
 }
 
 // ── Shared Photo Scan State & Concurrency Control ────────────────────────────
@@ -370,24 +321,26 @@ export async function scanDcimEntephotoPhotos(
     }
 
     try {
-      // 1. Ensure canonical directory exists and storage permission is granted
-      const initialized = await ensurePhotoDirectoryExists(silent);
-      if (!initialized) {
-        const hasPermission = await checkStoragePermission();
-        if (!hasPermission) {
-          if (!silent) {
-            console.warn(
-              `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
-            );
-          }
-          throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
+      // 1. Check storage permission without creating the directory
+      const hasPermission = await checkStoragePermission();
+      if (!hasPermission) {
+        if (!silent) {
+          console.warn(
+            `[LocalPhotoService] Storage permission denied. Cannot scan ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
+          );
         }
-        throw new Error(`Failed to access or create ${PHOTO_STORAGE_DISPLAY_PATH}`);
+        throw new Error(`Storage permission denied for ${PHOTO_STORAGE_DISPLAY_PATH}`);
       }
 
+      // 2. Check if canonical directory exists (does NOT create it — Trigger 1 & 2 only)
       const dir = new Directory(CANONICAL_DCIM_DIR_URI);
       if (!dir.exists) {
-        throw new Error(`Directory ${PHOTO_STORAGE_DISPLAY_PATH} does not exist`);
+        if (!silent) {
+          console.log(
+            `[LocalPhotoService] Directory ${PHOTO_STORAGE_DISPLAY_PATH} does not exist yet. Returning empty gallery.`,
+          );
+        }
+        return [];
       }
 
       const entries = dir.list();

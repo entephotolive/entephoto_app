@@ -13,6 +13,7 @@ import {
   Modal,
   Alert,
   Linking,
+  InteractionManager,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import {
@@ -43,6 +44,8 @@ import { useAuthStore } from '@/store/authStore';
 import { authService } from '@/services/authService';
 import { formatEventDate } from '@/utils/date';
 import { AppBackground } from '@/components/AppBackground';
+import { ensurePhotoDirectoryExists } from '@/services/localPhotoService';
+import { permissionCoordinator } from '@/services/permissionCoordinator';
 
 // Static asset mapping for local illustrations & photos
 const LOCAL_ASSETS: Record<string, any> = {
@@ -133,6 +136,56 @@ export const SelectEventScreen: React.FC = () => {
   const [isProfileModalVisible, setIsProfileModalVisible] = useState(false);
   const [isMobileWarningModalVisible, setIsMobileWarningModalVisible] = useState(false);
 
+  // ── Permission Notice State & Folder Initialization (Trigger #1) ───────────
+  const [permissionNotice, setPermissionNotice] = useState<{
+    visible: boolean;
+    type: 'denied' | 'blocked' | 'limited';
+    message: string;
+  }>({ visible: false, type: 'denied', message: '' });
+
+  const hasInitializedFolderRef = useRef(false);
+
+  const initPermissionsAndFolder = useCallback(async (force = false) => {
+    try {
+      const status = await permissionCoordinator.requestAppPermissions(force);
+
+      if (status.isPhotoGranted || status.isPhotoLimited) {
+        // Trigger 1: Folder creation when SelectEvent screen opens after permissions check
+        if (!hasInitializedFolderRef.current) {
+          const success = await ensurePhotoDirectoryExists(false);
+          hasInitializedFolderRef.current = success;
+        }
+
+        if (status.isPhotoLimited) {
+          setPermissionNotice({
+            visible: true,
+            type: 'limited',
+            message:
+              'Partial photo access granted. EntePhoto may not see all photos in the album until full access is granted.',
+          });
+        } else {
+          setPermissionNotice(prev => (prev.visible ? { ...prev, visible: false } : prev));
+        }
+      } else {
+        setPermissionNotice({
+          visible: true,
+          type: status.photo === 'blocked' ? 'blocked' : 'denied',
+          message:
+            'EntePhoto needs photo access to view and sync camera photos from your device storage.',
+        });
+      }
+    } catch (err) {
+      console.error('[SelectEventScreen] Permission and directory init error:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handle = InteractionManager.runAfterInteractions(() => {
+      initPermissionsAndFolder(false);
+    });
+    return () => handle.cancel();
+  }, [initPermissionsAndFolder]);
+
   // ── Filtered + sorted event list ───────────────────────────────────────────
   const filteredEvents = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -171,12 +224,35 @@ export const SelectEventScreen: React.FC = () => {
   }, [navigation]);
 
   const handleCardPress = useCallback(
-    (event: EventModel) => {
+    async (event: EventModel) => {
       if (isNavigatingRef.current) return;
 
       if (!event.mobile) {
         setSelectedEventId(event._id.$oid);
         setIsMobileWarningModalVisible(true);
+        return;
+      }
+
+      // Check photo access before navigating to CameraConnect
+      const photoStatus = await permissionCoordinator.checkPhotoPermission();
+      if (photoStatus !== 'granted' && photoStatus !== 'limited') {
+        Alert.alert(
+          'Photo Access Required',
+          `EntePhoto requires photo access to sync and save camera photos for "${event.title}".`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: photoStatus === 'blocked' ? 'Open Settings' : 'Grant Access',
+              onPress: () => {
+                if (photoStatus === 'blocked') {
+                  permissionCoordinator.openAppSettings();
+                } else {
+                  initPermissionsAndFolder(true);
+                }
+              },
+            },
+          ],
+        );
         return;
       }
 
@@ -194,7 +270,7 @@ export const SelectEventScreen: React.FC = () => {
         isNavigatingRef.current = false;
       }, 1500);
     },
-    [navigation],
+    [navigation, initPermissionsAndFolder],
   );
 
   const handleSignOut = useCallback(() => {
@@ -455,6 +531,67 @@ export const SelectEventScreen: React.FC = () => {
               />
             </View>
           </View>
+
+          {/* ── PERMISSION NOTICE BANNER ── */}
+          {permissionNotice.visible && (
+            <View
+              style={[
+                styles.permissionBanner,
+                {
+                  backgroundColor: isDark ? '#1F1B18' : '#FFF7ED',
+                  borderColor: isDark ? '#FF6B4A' : '#FDBA74',
+                },
+              ]}
+            >
+              <View style={styles.permissionBannerIconCol}>
+                <AlertCircle size={20} color="#FF6B4A" strokeWidth={2.4} />
+              </View>
+              <View style={styles.permissionBannerContent}>
+                <Text
+                  style={[styles.permissionBannerTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}
+                >
+                  {permissionNotice.type === 'limited'
+                    ? 'Partial Photo Access'
+                    : 'Photo Access Needed'}
+                </Text>
+                <Text
+                  style={[styles.permissionBannerText, { color: isDark ? '#A1A1AA' : '#7A7571' }]}
+                >
+                  {permissionNotice.message}
+                </Text>
+                <View style={styles.permissionBannerActions}>
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      if (
+                        permissionNotice.type === 'blocked' ||
+                        permissionNotice.type === 'limited'
+                      ) {
+                        permissionCoordinator.openAppSettings();
+                      } else {
+                        initPermissionsAndFolder(true);
+                      }
+                    }}
+                    style={styles.permissionActionBtn}
+                  >
+                    <Text style={styles.permissionActionBtnText}>
+                      {permissionNotice.type === 'blocked' || permissionNotice.type === 'limited'
+                        ? 'Open Settings'
+                        : 'Grant Permission'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setPermissionNotice(prev => ({ ...prev, visible: false }))}
+                    style={styles.permissionDismissBtn}
+                    accessibilityLabel="Dismiss permission notice"
+                  >
+                    <X size={16} color={isDark ? '#71717A' : '#A1A1AA'} strokeWidth={2} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          )}
 
           {/* ── SEARCH & FILTER ROW ── */}
           <View style={styles.searchRow}>
@@ -1359,5 +1496,54 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // Permission Notice Banner
+  permissionBanner: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    zIndex: 10,
+  },
+  permissionBannerIconCol: {
+    marginTop: 2,
+  },
+  permissionBannerContent: {
+    flex: 1,
+  },
+  permissionBannerTitle: {
+    fontFamily: FONTS.syne.bold,
+    fontSize: 14,
+    marginBottom: 2,
+  },
+  permissionBannerText: {
+    fontFamily: FONTS.plusJakartaSans.regular,
+    fontSize: 12,
+    lineHeight: 16,
+    marginBottom: 8,
+  },
+  permissionBannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  permissionActionBtn: {
+    backgroundColor: '#FF6B4A',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  permissionActionBtnText: {
+    fontFamily: FONTS.plusJakartaSans.bold,
+    fontSize: 12,
+    color: '#FFFFFF',
+  },
+  permissionDismissBtn: {
+    padding: 4,
   },
 });

@@ -18,7 +18,6 @@ import {
 import { ThemeProvider, ThemeMode } from '@/constants/theme';
 import { RootNavigator } from '@/navigation/RootNavigator';
 import { storageService } from '@/services/storageService';
-import { ensurePhotoDirectoryExists } from '@/services/localPhotoService';
 
 // Keep splash screen visible while resources load
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -61,11 +60,6 @@ export const AppRoot: React.FC = () => {
           setInitialTheme('light');
         }
       });
-
-    // Automatically initialize canonical DCIM/Entephoto directory on startup
-    ensurePhotoDirectoryExists(true).catch(err => {
-      console.warn('[AppRoot] Directory initialization notice:', err);
-    });
 
     return () => {
       isMounted = false;

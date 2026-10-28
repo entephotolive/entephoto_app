@@ -1,5 +1,13 @@
 import { apiClient } from './apiClient';
 import { API_ENDPOINTS } from '../config/api.config';
+import {
+  generateEventLiveQrUrl,
+  tryGenerateEventLiveQrUrl,
+  extractEventId,
+  normalizeRedirectUrl,
+} from '../utils/eventQr';
+
+export { generateEventLiveQrUrl, tryGenerateEventLiveQrUrl, extractEventId, normalizeRedirectUrl };
 
 export interface EventModel {
   _id: { $oid: string };
@@ -146,6 +154,14 @@ export const eventService = {
   /**
    * Fetches details of a specific event
    */
+  /**
+   * Generates the dynamic live QR destination URL for an event
+   * Format: {EXPO_PUBLIC_REDIRECT_URL}/event/{eventId}/live
+   */
+  getEventLiveQrUrl(eventOrId: EventModel | string, redirectUrl?: string): string {
+    return generateEventLiveQrUrl(eventOrId, redirectUrl);
+  },
+
   async getEventDetails(eventId: string): Promise<EventModel> {
     console.log(`[eventService:getEventDetails] Fetching event details for: ${eventId}`);
     try {
