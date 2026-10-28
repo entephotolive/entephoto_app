@@ -6,6 +6,7 @@ import com.photoceremony.entephotocamera.diagnostics.DiagnosticRecord
 import com.photoceremony.entephotocamera.notifications.NotificationHelper
 import com.photoceremony.entephotocamera.notifications.UploadForegroundService
 import android.content.ContentUris
+import androidx.documentfile.provider.DocumentFile
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -209,33 +210,133 @@ class EntePhotoCameraModule : Module() {
 
         // ── MediaStore & Storage bridge ──────────────────────────────────────
 
+        Function("checkFolderPhysicallyExists") {
+            try {
+                val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DCIM
+                )
+                val entephotoDir = File(dcimDir, "Entephoto")
+                entephotoDir.exists() && entephotoDir.isDirectory
+            } catch (e: Exception) {
+                Timber.w(e, "EntePhotoCameraModule: checkFolderPhysicallyExists error")
+                false
+            }
+        }
+
+        Function("tryDirectMkdirs") {
+            try {
+                val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DCIM
+                )
+                val entephotoDir = File(dcimDir, "Entephoto")
+                if (entephotoDir.exists() && entephotoDir.isDirectory) {
+                    "already_exists"
+                } else if (entephotoDir.mkdirs()) {
+                    "created"
+                } else {
+                    "failed"
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "EntePhotoCameraModule: tryDirectMkdirs error")
+                "failed"
+            }
+        }
+
+        Function("createSubdirectoryWithTreeUri") { treeUriString: String, subDirName: String ->
+            val result = mutableMapOf<String, Any>(
+                "success" to false,
+                "alreadyExists" to false
+            )
+            val ctx = appContext.reactContext ?: return@Function result
+            try {
+                val treeUri = Uri.parse(treeUriString)
+                val docFile = DocumentFile.fromTreeUri(ctx, treeUri)
+                if (docFile != null && docFile.isDirectory) {
+                    val existing = docFile.findFile(subDirName)
+                    if (existing != null && existing.isDirectory) {
+                        result["success"] = true
+                        result["alreadyExists"] = true
+                        result["uri"] = existing.uri.toString()
+                    } else {
+                        val created = docFile.createDirectory(subDirName)
+                        if (created != null) {
+                            result["success"] = true
+                            result["alreadyExists"] = false
+                            result["uri"] = created.uri.toString()
+                        } else {
+                            result["error"] = "Failed to create directory via DocumentFile"
+                        }
+                    }
+                } else {
+                    result["error"] = "Tree URI is not accessible or not a directory"
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "EntePhotoCameraModule: createSubdirectoryWithTreeUri failed")
+                result["error"] = e.message ?: "Unknown exception"
+            }
+            result
+        }
+
+        Function("getPersistedUriPermissions") {
+            val ctx = appContext.reactContext ?: return@Function emptyList<String>()
+            try {
+                ctx.contentResolver.persistedUriPermissions
+                    .filter { it.isReadPermission && it.isWritePermission }
+                    .map { it.uri.toString() }
+            } catch (e: Exception) {
+                emptyList<String>()
+            }
+        }
+
+        Function("releasePersistedUriPermission") { uriString: String ->
+            val ctx = appContext.reactContext ?: return@Function false
+            try {
+                val uri = Uri.parse(uriString)
+                ctx.contentResolver.releasePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                true
+            } catch (e: Exception) {
+                Timber.w(e, "EntePhotoCameraModule: releasePersistedUriPermission failed")
+                false
+            }
+        }
+
         AsyncFunction("ensureStorageReady") {
             val ctx = appContext.reactContext
             val apiLevel = Build.VERSION.SDK_INT
             val isScopedStorage = apiLevel >= Build.VERSION_CODES.Q
+            val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DCIM
+            )
+            val entephotoDir = File(dcimDir, "Entephoto")
+            val physicalExists = try {
+                entephotoDir.exists() && entephotoDir.isDirectory
+            } catch (e: Exception) {
+                false
+            }
+
             val result = mutableMapOf<String, Any>(
-                "ready" to true,
+                "ready" to physicalExists,
+                "physicalExists" to physicalExists,
                 "apiLevel" to apiLevel,
                 "isScopedStorage" to isScopedStorage,
                 "targetPath" to "DCIM/Entephoto/"
             )
 
-            if (!isScopedStorage && ctx != null) {
-                try {
-                    val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(
-                        android.os.Environment.DIRECTORY_DCIM
-                    )
-                    val entephotoDir = File(dcimDir, "Entephoto")
-                    if (!entephotoDir.exists()) {
+            if (!physicalExists) {
+                if (!isScopedStorage && ctx != null) {
+                    try {
                         val created = entephotoDir.mkdirs()
                         result["directoryCreated"] = created
-                    } else {
-                        result["directoryCreated"] = false
+                        result["ready"] = created
+                        result["physicalExists"] = created
+                    } catch (e: Exception) {
+                        Timber.w(e, "EntePhotoCameraModule: legacy mkdir failed")
+                        result["ready"] = false
+                        result["error"] = e.message ?: "Failed to create legacy directory"
                     }
-                } catch (e: Exception) {
-                    Timber.w(e, "EntePhotoCameraModule: legacy mkdir failed")
-                    result["ready"] = false
-                    result["error"] = e.message ?: "Failed to create legacy directory"
                 }
             }
             result

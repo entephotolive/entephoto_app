@@ -38,7 +38,7 @@ import {
   Download,
 } from 'lucide-react-native';
 import { QRCodeView } from '@/components/QRCodeView';
-import { tryGenerateEventLiveQrUrl } from '@/utils/eventQr';
+import { tryGenerateEventLiveQrUrl, getEventInitials } from '@/utils/eventQr';
 import { qrExportService } from '@/services/qrExportService';
 import { useNavigation } from '@react-navigation/native';
 import { AppNavigationProp } from '@/navigation/types';
@@ -1122,8 +1122,7 @@ export const SelectEventScreen: React.FC = () => {
             ]}
           >
             {/* Modal Header Handle & Close Button */}
-            <View style={styles.modalHeader}>
-              <View style={styles.modalHandle} />
+            <View style={[styles.modalHeader, { justifyContent: 'flex-end' }]}>
               <TouchableOpacity
                 onPress={handleCloseQrModal}
                 accessibilityRole="button"
@@ -1145,26 +1144,9 @@ export const SelectEventScreen: React.FC = () => {
                   <Text style={[styles.qrModalTitle, { color: isDark ? '#F4F4F5' : '#161616' }]}>
                     Event QR Code
                   </Text>
-                  {/* Subtle teal accent tag */}
-                  <View
-                    style={[
-                      styles.qrTealBadge,
-                      {
-                        backgroundColor: isDark
-                          ? 'rgba(69, 223, 164, 0.15)'
-                          : 'rgba(27, 184, 122, 0.12)',
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[styles.qrTealBadgeText, { color: isDark ? '#45DFA4' : '#1BB87A' }]}
-                    >
-                      LIVE
-                    </Text>
-                  </View>
                 </View>
                 <Text style={[styles.qrModalSubtitle, { color: isDark ? '#A1A1AA' : '#7A7571' }]}>
-                  Scan this QR code to upload photos to this event.
+                  Scan this QR code to view and download photos from this event.
                 </Text>
               </View>
 
@@ -1209,6 +1191,7 @@ export const SelectEventScreen: React.FC = () => {
                   {qrUrlResult.success && qrUrlResult.url ? (
                     <QRCodeView
                       value={qrUrlResult.url}
+                      initials={getEventInitials(selectedQrEvent?.title)}
                       size={200}
                       quietZone={4}
                       color="#000000"

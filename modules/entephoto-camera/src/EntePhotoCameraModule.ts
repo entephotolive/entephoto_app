@@ -78,6 +78,15 @@ export type StoredPhotoResult = {
   mimeType: string;
 };
 
+export type SubdirectorySafResult = {
+  success: boolean;
+  alreadyExists: boolean;
+  uri?: string;
+  error?: string;
+};
+
+export type DirectMkdirResult = 'already_exists' | 'created' | 'failed';
+
 export type StorageReadyResult = {
   ready: boolean;
   apiLevel: number;
@@ -121,6 +130,11 @@ export type CameraEvents = {
 
 declare class EntePhotoCameraModule extends NativeModule<CameraEvents> {
   // ── MediaStore & Storage methods ──────────────────────────────────────────
+  checkFolderPhysicallyExists(): boolean;
+  tryDirectMkdirs(): DirectMkdirResult;
+  createSubdirectoryWithTreeUri(treeUriString: string, subDirName: string): SubdirectorySafResult;
+  getPersistedUriPermissions(): string[];
+  releasePersistedUriPermission(uriString: string): boolean;
   ensureStorageReady(): Promise<StorageReadyResult>;
   queryStoredPhotos(relativeDir?: string | null): Promise<StoredPhotoResult[]>;
   deleteStoredPhoto(uriString: string): Promise<boolean>;

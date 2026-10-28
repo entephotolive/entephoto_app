@@ -143,6 +143,54 @@ export function tryGenerateEventLiveQrUrl(
 }
 
 /**
+ * Extracts initials dynamically from an event title for display in the QR code centre badge.
+ *
+ * Rules:
+ * - Trim whitespace and handle uppercase and lowercase titles.
+ * - Recognize "and" and "&" as separators between two names or title parts.
+ * - When a title contains two sides separated by one of these delimiters, extract the first
+ *   meaningful letter from each side and join them with "&" (e.g. "bride and groom" -> "B&G").
+ * - When there is no pair separator, use the first meaningful letter of the title (e.g. "Wedding" -> "W").
+ * - Ignore leading spaces and punctuation when extracting initials.
+ * - Fall back to "E" (Event) for missing, empty, or malformed titles.
+ */
+export function getEventInitials(title?: string | null): string {
+  if (!title || typeof title !== 'string') {
+    return 'E';
+  }
+
+  const clean = title.trim();
+  if (!clean || clean.toLowerCase() === 'and' || clean === '&') {
+    return 'E';
+  }
+
+  const parts = clean.split(/\s+and\s+|\s*&\s*/i);
+  if (parts.length >= 2) {
+    const firstPart = parts[0];
+    const secondPart = parts.slice(1).join(' ');
+
+    const firstCharMatch = firstPart.match(/[a-zA-Z0-9]/);
+    const secondCharMatch = secondPart.match(/[a-zA-Z0-9]/);
+
+    const firstChar = firstCharMatch ? firstCharMatch[0].toUpperCase() : '';
+    const secondChar = secondCharMatch ? secondCharMatch[0].toUpperCase() : '';
+
+    if (firstChar && secondChar) {
+      return `${firstChar}&${secondChar}`;
+    }
+    if (firstChar) {
+      return firstChar;
+    }
+    if (secondChar) {
+      return secondChar;
+    }
+  }
+
+  const match = clean.match(/[a-zA-Z0-9]/);
+  return match ? match[0].toUpperCase() : 'E';
+}
+
+/**
  * Fast CRC-32 calculation for PNG chunk checksums.
  */
 function createCrcTable(): Uint32Array {
@@ -182,24 +230,300 @@ export function adler32(buf: Uint8Array): number {
   return ((b << 16) | a) >>> 0;
 }
 
+// 5x7 bitmapped font for uppercase alphanumeric glyphs and &
+const FONT_5X7: Record<string, number[]> = {
+  A: [0x7c, 0x12, 0x11, 0x12, 0x7c],
+  B: [0x7f, 0x49, 0x49, 0x49, 0x36],
+  C: [0x3e, 0x41, 0x41, 0x41, 0x22],
+  D: [0x7f, 0x41, 0x41, 0x22, 0x1c],
+  E: [0x7f, 0x49, 0x49, 0x49, 0x41],
+  F: [0x7f, 0x09, 0x09, 0x09, 0x01],
+  G: [0x3e, 0x41, 0x49, 0x49, 0x7a],
+  H: [0x7f, 0x08, 0x08, 0x08, 0x7f],
+  I: [0x00, 0x41, 0x7f, 0x41, 0x00],
+  J: [0x20, 0x40, 0x41, 0x3f, 0x01],
+  K: [0x7f, 0x08, 0x14, 0x22, 0x41],
+  L: [0x7f, 0x40, 0x40, 0x40, 0x40],
+  M: [0x7f, 0x02, 0x0c, 0x02, 0x7f],
+  N: [0x7f, 0x04, 0x08, 0x10, 0x7f],
+  O: [0x3e, 0x41, 0x41, 0x41, 0x3e],
+  P: [0x7f, 0x09, 0x09, 0x09, 0x06],
+  Q: [0x3e, 0x41, 0x51, 0x21, 0x5e],
+  R: [0x7f, 0x09, 0x19, 0x29, 0x46],
+  S: [0x46, 0x49, 0x49, 0x49, 0x31],
+  T: [0x01, 0x01, 0x7f, 0x01, 0x01],
+  U: [0x3f, 0x40, 0x40, 0x40, 0x3f],
+  V: [0x1f, 0x20, 0x40, 0x20, 0x1f],
+  W: [0x7f, 0x20, 0x18, 0x20, 0x7f],
+  X: [0x63, 0x14, 0x08, 0x14, 0x63],
+  Y: [0x07, 0x08, 0x70, 0x08, 0x07],
+  Z: [0x61, 0x51, 0x49, 0x45, 0x43],
+  '&': [0x36, 0x49, 0x55, 0x22, 0x50],
+  '0': [0x3e, 0x51, 0x49, 0x45, 0x3e],
+  '1': [0x00, 0x42, 0x7f, 0x40, 0x00],
+  '2': [0x42, 0x61, 0x51, 0x49, 0x46],
+  '3': [0x21, 0x41, 0x45, 0x4b, 0x31],
+  '4': [0x18, 0x14, 0x12, 0x7f, 0x10],
+  '5': [0x27, 0x45, 0x45, 0x45, 0x39],
+  '6': [0x3c, 0x4a, 0x49, 0x49, 0x30],
+  '7': [0x01, 0x71, 0x09, 0x05, 0x03],
+  '8': [0x36, 0x49, 0x49, 0x49, 0x36],
+  '9': [0x06, 0x49, 0x49, 0x29, 0x1e],
+};
+
+function isInsideRoundedRect(
+  px: number,
+  py: number,
+  rx: number,
+  ry: number,
+  rw: number,
+  rh: number,
+  rad: number,
+): boolean {
+  if (px < rx || px >= rx + rw || py < ry || py >= ry + rh) {
+    return false;
+  }
+  if (rad <= 0) {
+    return true;
+  }
+
+  const left = px < rx + rad;
+  const right = px >= rx + rw - rad;
+  const top = py < ry + rad;
+  const bottom = py >= ry + rh - rad;
+
+  if (left && top) {
+    const dx = px - (rx + rad);
+    const dy = py - (ry + rad);
+    return dx * dx + dy * dy <= rad * rad;
+  }
+  if (right && top) {
+    const dx = px - (rx + rw - rad - 1);
+    const dy = py - (ry + rad);
+    return dx * dx + dy * dy <= rad * rad;
+  }
+  if (left && bottom) {
+    const dx = px - (rx + rad);
+    const dy = py - (ry + rh - rad - 1);
+    return dx * dx + dy * dy <= rad * rad;
+  }
+  if (right && bottom) {
+    const dx = px - (rx + rw - rad - 1);
+    const dy = py - (ry + rh - rad - 1);
+    return dx * dx + dy * dy <= rad * rad;
+  }
+  return true;
+}
+
+export interface QrLayoutModule {
+  px: number;
+  py: number;
+  tl: boolean;
+  tr: boolean;
+  br: boolean;
+  bl: boolean;
+}
+
+export interface QrLayoutFillet {
+  px: number;
+  py: number;
+  corner: 'tl' | 'tr' | 'bl' | 'br';
+}
+
+export interface QrLayoutFinder {
+  fx: number;
+  fy: number;
+}
+
+export interface QrLayoutBadge {
+  cx: number;
+  cy: number;
+  r: number;
+  diameterRatio: number;
+  initials: string;
+}
+
+export interface QrLayoutModel {
+  modSize: number;
+  totalModules: number;
+  modules: QrLayoutModule[];
+  fillets: QrLayoutFillet[];
+  finders: QrLayoutFinder[];
+  badge: QrLayoutBadge;
+}
+
 /**
- * Generates an uncompressed high-resolution PNG image directly from a QR URL.
- * Produces crisp, pixel-perfect black & white modules with standard quiet-zone margins.
- *
- * @param url - Destination live event URL to encode
- * @param scale - Pixels per QR module (default 20 -> ~820x820px)
- * @param quietZone - Quiet-zone margin in modules (default 4)
- * @returns Uint8Array containing complete PNG file bytes
+ * Shared mathematical geometry layout for both SVG display and PNG rasterization.
+ * Computes connected organic module contours, concave corner fillets, rounded finders,
+ * and the compact circular centre badge.
  */
-export function generateQrPngBytes(url: string, scale = 20, quietZone = 4): Uint8Array {
-  const matrix = toQR(url);
+export function getQrLayout(url: string, quietZone = 4, initials?: string): QrLayoutModel {
+  // Use Error Correction Level High (2) for 30% recovery capacity
+  const matrix = toQR(url, 2);
   const modSize = Math.round(Math.sqrt(matrix.length));
   if (modSize === 0) {
     throw new Error('Failed to generate QR matrix: empty output.');
   }
 
-  const totalMods = modSize + quietZone * 2;
-  const imgSize = totalMods * scale;
+  const totalModules = modSize + quietZone * 2;
+  const centerMod = modSize / 2;
+
+  // Compact badge ~15-16% of QR symbol width (diameter ~7.8 modules, radius ~3.9 modules for 49x49)
+  const badgeRadius = Math.max(3.5, modSize * 0.08);
+
+  const isFinder = (mx: number, my: number): boolean => {
+    if (mx < 8 && my < 8) return true;
+    if (mx >= modSize - 8 && my < 8) return true;
+    if (mx < 8 && my >= modSize - 8) return true;
+    return false;
+  };
+
+  const isBadge = (mx: number, my: number): boolean => {
+    const dx = mx + 0.5 - centerMod;
+    const dy = my + 0.5 - centerMod;
+    return dx * dx + dy * dy <= badgeRadius * badgeRadius;
+  };
+
+  const getCell = (x: number, y: number): number => {
+    if (x < 0 || x >= modSize || y < 0 || y >= modSize) return 0;
+    return matrix[y * modSize + x] ? 1 : 0;
+  };
+
+  // 1. Data modules with neighbor-aware corner rounding
+  const modules: QrLayoutModule[] = [];
+  for (let my = 0; my < modSize; my++) {
+    for (let mx = 0; mx < modSize; mx++) {
+      if (isFinder(mx, my) || isBadge(mx, my)) continue;
+      if (!getCell(mx, my)) continue;
+
+      const T = getCell(mx, my - 1) && !isFinder(mx, my - 1) && !isBadge(mx, my - 1);
+      const B = getCell(mx, my + 1) && !isFinder(mx, my + 1) && !isBadge(mx, my + 1);
+      const L = getCell(mx - 1, my) && !isFinder(mx - 1, my) && !isBadge(mx - 1, my);
+      const R = getCell(mx + 1, my) && !isFinder(mx + 1, my) && !isBadge(mx + 1, my);
+
+      modules.push({
+        px: mx + quietZone,
+        py: my + quietZone,
+        tl: !T && !L,
+        tr: !T && !R,
+        br: !B && !R,
+        bl: !B && !L,
+      });
+    }
+  }
+
+  // 2. Concave fillets on white cells surrounded by dark modules
+  const fillets: QrLayoutFillet[] = [];
+  for (let my = 0; my < modSize; my++) {
+    for (let mx = 0; mx < modSize; mx++) {
+      if (isFinder(mx, my) || isBadge(mx, my)) continue;
+      if (getCell(mx, my)) continue; // white cells only
+
+      const T = getCell(mx, my - 1) && !isFinder(mx, my - 1) && !isBadge(mx, my - 1);
+      const B = getCell(mx, my + 1) && !isFinder(mx, my + 1) && !isBadge(mx, my + 1);
+      const L = getCell(mx - 1, my) && !isFinder(mx - 1, my) && !isBadge(mx - 1, my);
+      const R = getCell(mx + 1, my) && !isFinder(mx + 1, my) && !isBadge(mx + 1, my);
+
+      const px = mx + quietZone;
+      const py = my + quietZone;
+
+      if (T && L) fillets.push({ px, py, corner: 'tl' });
+      if (T && R) fillets.push({ px, py, corner: 'tr' });
+      if (B && L) fillets.push({ px, py, corner: 'bl' });
+      if (B && R) fillets.push({ px, py, corner: 'br' });
+    }
+  }
+
+  // 3. 3 Rounded Finder patterns
+  const finders: QrLayoutFinder[] = [
+    { fx: quietZone, fy: quietZone },
+    { fx: quietZone + modSize - 7, fy: quietZone },
+    { fx: quietZone, fy: quietZone + modSize - 7 },
+  ];
+
+  return {
+    modSize,
+    totalModules,
+    modules,
+    fillets,
+    finders,
+    badge: {
+      cx: quietZone + centerMod,
+      cy: quietZone + centerMod,
+      r: badgeRadius,
+      diameterRatio: (badgeRadius * 2) / totalModules,
+      initials: initials ? initials.trim() : '',
+    },
+  };
+}
+
+/**
+ * Generates an SVG path string from a QrLayoutModel, creating bold, continuous organic shapes
+ * with rounded module caps and smooth concave fillets.
+ */
+export function generateQrSvgPath(layout: QrLayoutModel): string {
+  let d = '';
+  const r = 0.5;
+
+  for (const m of layout.modules) {
+    const x0 = m.px;
+    const x1 = m.px + 1;
+    const y0 = m.py;
+    const y1 = m.py + 1;
+
+    d += `M${x0 + (m.tl ? r : 0)},${y0} `;
+    d += `L${x1 - (m.tr ? r : 0)},${y0} `;
+    if (m.tr) d += `A${r} ${r} 0 0 1 ${x1},${y0 + r} `;
+    d += `L${x1},${y1 - (m.br ? r : 0)} `;
+    if (m.br) d += `A${r} ${r} 0 0 1 ${x1 - r},${y1} `;
+    d += `L${x0 + (m.bl ? r : 0)},${y1} `;
+    if (m.bl) d += `A${r} ${r} 0 0 1 ${x0},${y1 - r} `;
+    d += `L${x0},${y0 + (m.tl ? r : 0)} `;
+    if (m.tl) d += `A${r} ${r} 0 0 1 ${x0 + r},${y0} `;
+    d += 'Z ';
+  }
+
+  const rf = 0.35;
+  for (const f of layout.fillets) {
+    const px = f.px;
+    const py = f.py;
+    if (f.corner === 'tl') {
+      d += `M${px},${py} L${px + rf},${py} A${rf} ${rf} 0 0 0 ${px},${py + rf} Z `;
+    } else if (f.corner === 'tr') {
+      d += `M${px + 1},${py} L${px + 1},${py + rf} A${rf} ${rf} 0 0 0 ${px + 1 - rf},${py} Z `;
+    } else if (f.corner === 'bl') {
+      d += `M${px},${py + 1} L${px},${py + 1 - rf} A${rf} ${rf} 0 0 0 ${px + rf},${py + 1} Z `;
+    } else if (f.corner === 'br') {
+      d += `M${px + 1},${py + 1} L${px + 1 - rf},${py + 1} A${rf} ${rf} 0 0 0 ${px + 1},${py + 1 - rf} Z `;
+    }
+  }
+
+  return d;
+}
+
+/**
+ * Generates an uncompressed high-resolution PNG image directly from a QR URL
+ * matching the EntePhoto modern organic QR design:
+ * - Continuous connected rounded modules on pure white background
+ * - Generously rounded finder patterns
+ * - Generous quiet zone
+ * - Compact circular white centre badge with dynamic event initials in bold dark typography
+ * - High error correction (ECLevel.H) for 100% reliable scanning
+ *
+ * @param url - Destination live event URL to encode
+ * @param scale - Pixels per QR module (default 20 -> ~1140x1140px)
+ * @param quietZone - Quiet-zone margin in modules (default 4)
+ * @param initials - Event initials to render in the centre badge (e.g. "B&G")
+ * @returns Uint8Array containing complete PNG file bytes
+ */
+export function generateQrPngBytes(
+  url: string,
+  scale = 20,
+  quietZone = 4,
+  initials?: string,
+): Uint8Array {
+  const layout = getQrLayout(url, quietZone, initials);
+  const imgSize = layout.totalModules * scale;
 
   // Raw uncompressed scanlines (Grayscale 8-bit: 1 byte/pixel: 0=black, 255=white)
   // Each scanline begins with a filter-type byte (0 = None)
@@ -213,17 +537,184 @@ export function generateQrPngBytes(url: string, scale = 20, quietZone = 4): Uint
     rawData[y * rowBytes] = 0;
   }
 
-  // Paint dark modules (0)
-  for (let my = 0; my < modSize; my++) {
-    for (let mx = 0; mx < modSize; mx++) {
-      if (matrix[my * modSize + mx]) {
-        const startY = (my + quietZone) * scale;
-        const startX = (mx + quietZone) * scale;
-        for (let dy = 0; dy < scale; dy++) {
-          const rowOffset = (startY + dy) * rowBytes + 1 + startX;
-          rawData.fill(0, rowOffset, rowOffset + scale);
+  const setPixel = (px: number, py: number, val: number) => {
+    if (px >= 0 && px < imgSize && py >= 0 && py < imgSize) {
+      rawData[py * rowBytes + 1 + px] = val;
+    }
+  };
+
+  const halfScale = scale / 2;
+  const radSq = halfScale * halfScale;
+
+  // 1. Draw continuous connected data modules
+  for (const m of layout.modules) {
+    const cellX = m.px * scale;
+    const cellY = m.py * scale;
+
+    for (let dy = 0; dy < scale; dy++) {
+      for (let dx = 0; dx < scale; dx++) {
+        let dark = true;
+        if (dx < halfScale && dy < halfScale) {
+          if (m.tl) {
+            const rx = dx - halfScale;
+            const ry = dy - halfScale;
+            if (rx * rx + ry * ry > radSq) dark = false;
+          }
+        } else if (dx >= halfScale && dy < halfScale) {
+          if (m.tr) {
+            const rx = dx - halfScale;
+            const ry = dy - halfScale;
+            if (rx * rx + ry * ry > radSq) dark = false;
+          }
+        } else if (dx < halfScale && dy >= halfScale) {
+          if (m.bl) {
+            const rx = dx - halfScale;
+            const ry = dy - halfScale;
+            if (rx * rx + ry * ry > radSq) dark = false;
+          }
+        } else {
+          if (m.br) {
+            const rx = dx - halfScale;
+            const ry = dy - halfScale;
+            if (rx * rx + ry * ry > radSq) dark = false;
+          }
+        }
+        if (dark) {
+          setPixel(cellX + dx, cellY + dy, 0);
         }
       }
+    }
+  }
+
+  // 2. Draw concave inner fillets on white cells
+  const rf = Math.round(0.35 * scale);
+  const rfSq = rf * rf;
+  for (const f of layout.fillets) {
+    const cellX = f.px * scale;
+    const cellY = f.py * scale;
+
+    if (f.corner === 'tl') {
+      for (let dy = 0; dy < rf; dy++) {
+        for (let dx = 0; dx < rf; dx++) {
+          const rx = dx - rf;
+          const ry = dy - rf;
+          if (rx * rx + ry * ry >= rfSq) setPixel(cellX + dx, cellY + dy, 0);
+        }
+      }
+    } else if (f.corner === 'tr') {
+      for (let dy = 0; dy < rf; dy++) {
+        for (let dx = scale - rf; dx < scale; dx++) {
+          const rx = dx - (scale - rf);
+          const ry = dy - rf;
+          if (rx * rx + ry * ry >= rfSq) setPixel(cellX + dx, cellY + dy, 0);
+        }
+      }
+    } else if (f.corner === 'bl') {
+      for (let dy = scale - rf; dy < scale; dy++) {
+        for (let dx = 0; dx < rf; dx++) {
+          const rx = dx - rf;
+          const ry = dy - (scale - rf);
+          if (rx * rx + ry * ry >= rfSq) setPixel(cellX + dx, cellY + dy, 0);
+        }
+      }
+    } else if (f.corner === 'br') {
+      for (let dy = scale - rf; dy < scale; dy++) {
+        for (let dx = scale - rf; dx < scale; dx++) {
+          const rx = dx - (scale - rf);
+          const ry = dy - (scale - rf);
+          if (rx * rx + ry * ry >= rfSq) setPixel(cellX + dx, cellY + dy, 0);
+        }
+      }
+    }
+  }
+
+  // 3. Draw 3 rounded Finder patterns
+  for (const f of layout.finders) {
+    const rx = f.fx * scale;
+    const ry = f.fy * scale;
+    const size7 = 7 * scale;
+    const size5 = 5 * scale;
+    const size3 = 3 * scale;
+    const offset1 = 1 * scale;
+    const offset2 = 2 * scale;
+
+    const rOuter = Math.round(2.2 * scale);
+    const rMid = Math.round(1.5 * scale);
+    const rCore = Math.round(1.0 * scale);
+
+    for (let py = 0; py < size7; py++) {
+      for (let px = 0; px < size7; px++) {
+        const absX = rx + px;
+        const absY = ry + py;
+
+        const inOuter = isInsideRoundedRect(px, py, 0, 0, size7, size7, rOuter);
+        const inMid = isInsideRoundedRect(px, py, offset1, offset1, size5, size5, rMid);
+        const inCore = isInsideRoundedRect(px, py, offset2, offset2, size3, size3, rCore);
+
+        if (inCore) {
+          setPixel(absX, absY, 0); // Black core
+        } else if (inMid) {
+          setPixel(absX, absY, 255); // White separator
+        } else if (inOuter) {
+          setPixel(absX, absY, 0); // Black outer frame
+        }
+      }
+    }
+  }
+
+  // 4. Draw Center circular white badge
+  const badgeR = layout.badge.r * scale;
+  const cx = layout.badge.cx * scale;
+  const cy = layout.badge.cy * scale;
+  const minPy = Math.max(0, Math.floor(cy - badgeR - 2));
+  const maxPy = Math.min(imgSize - 1, Math.ceil(cy + badgeR + 2));
+  const minPx = Math.max(0, Math.floor(cx - badgeR - 2));
+  const maxPx = Math.min(imgSize - 1, Math.ceil(cx + badgeR + 2));
+  for (let py = minPy; py <= maxPy; py++) {
+    for (let px = minPx; px <= maxPx; px++) {
+      const dx = px - cx;
+      const dy = py - cy;
+      if (dx * dx + dy * dy <= badgeR * badgeR) {
+        setPixel(px, py, 255);
+      }
+    }
+  }
+
+  // 5. Render Initials in bold dark typography inside the centre badge
+  const text = layout.badge.initials;
+  if (text) {
+    const chars = text.split('');
+    const charW = 5;
+    const charH = 7;
+    const charSpacing = 1;
+    const totalFontW = chars.length * charW + (chars.length - 1) * charSpacing;
+    const totalFontH = charH;
+
+    const maxTargetW = badgeR * 1.35;
+    const fontPixelScale = Math.max(2, Math.floor(maxTargetW / totalFontW));
+    const renderedW = totalFontW * fontPixelScale;
+    const renderedH = totalFontH * fontPixelScale;
+    const textStartX = Math.round(cx - renderedW / 2);
+    const textStartY = Math.round(cy - renderedH / 2);
+
+    let curX = textStartX;
+    for (const char of chars) {
+      const glyph = FONT_5X7[char] || FONT_5X7['E'];
+      for (let col = 0; col < charW; col++) {
+        const colBits = glyph[col] || 0;
+        for (let row = 0; row < charH; row++) {
+          if ((colBits >> row) & 1) {
+            for (let dy = 0; dy < fontPixelScale; dy++) {
+              for (let dx = 0; dx < fontPixelScale; dx++) {
+                const py = textStartY + row * fontPixelScale + dy;
+                const px = curX + col * fontPixelScale + dx;
+                setPixel(px, py, 0); // Bold black typography
+              }
+            }
+          }
+        }
+      }
+      curX += (charW + charSpacing) * fontPixelScale;
     }
   }
 

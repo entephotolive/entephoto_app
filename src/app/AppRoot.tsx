@@ -1,5 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, StyleSheet, Image } from 'react-native';
+import {
+  View,
+  StyleSheet,
+  Image,
+  Platform,
+  Alert,
+  AppState,
+  InteractionManager,
+} from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
@@ -18,6 +26,7 @@ import {
 import { ThemeProvider, ThemeMode } from '@/constants/theme';
 import { RootNavigator } from '@/navigation/RootNavigator';
 import { storageService } from '@/services/storageService';
+import { initializeEntePhotoFolder } from '@/services/localPhotoService';
 
 // Keep splash screen visible while resources load
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -67,6 +76,71 @@ export const AppRoot: React.FC = () => {
   }, []);
 
   const isReady = (fontsLoaded || fontError) && initialTheme !== null;
+
+  const hasPromptedSafRef = React.useRef(false);
+
+  useEffect(() => {
+    if (!isReady) return;
+
+    let isMounted = true;
+    const runStartupStorageInit = async () => {
+      try {
+        const res = await initializeEntePhotoFolder({ interactive: false });
+        if (!isMounted) return;
+
+        console.log('[AppRoot] Startup folder init result:', res);
+
+        if (
+          res.status === 'permission_required' &&
+          Platform.OS === 'android' &&
+          !hasPromptedSafRef.current
+        ) {
+          hasPromptedSafRef.current = true;
+          Alert.alert(
+            'Setup EntePhoto Folder',
+            'EntePhoto needs access to your DCIM folder so camera photos are saved to "DCIM/Entephoto" on your device storage.',
+            [
+              { text: 'Later', style: 'cancel' },
+              {
+                text: 'Select DCIM Folder',
+                onPress: () => {
+                  initializeEntePhotoFolder({ interactive: true }).catch(err => {
+                    console.warn('[AppRoot] Interactive folder init error:', err);
+                  });
+                },
+              },
+            ],
+          );
+        }
+      } catch (err) {
+        console.warn('[AppRoot] Non-blocking storage init warning:', err);
+      }
+    };
+
+    const handle = InteractionManager.runAfterInteractions(() => {
+      runStartupStorageInit();
+    });
+
+    return () => {
+      isMounted = false;
+      handle.cancel();
+    };
+  }, [isReady]);
+
+  // Handle repeated foreground/resume events safely without showing unprompted alerts
+  useEffect(() => {
+    if (!isReady || Platform.OS !== 'android') return;
+
+    const sub = AppState.addEventListener('change', nextState => {
+      if (nextState === 'active') {
+        initializeEntePhotoFolder({ interactive: false }).catch(() => {});
+      }
+    });
+
+    return () => {
+      sub.remove();
+    };
+  }, [isReady]);
 
   const onLayoutSplash = useCallback(async () => {
     await SplashScreen.hideAsync().catch(() => {});

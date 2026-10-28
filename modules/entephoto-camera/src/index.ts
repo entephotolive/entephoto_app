@@ -7,6 +7,8 @@ import EntePhotoCameraModule, {
   PhotoSkippedEvent,
   StoredPhotoResult,
   StorageReadyResult,
+  SubdirectorySafResult,
+  DirectMkdirResult,
 } from './EntePhotoCameraModule';
 import { EventSubscription } from 'expo-modules-core';
 import { Platform, PermissionsAndroid } from 'react-native';
@@ -102,6 +104,35 @@ export function addPhotoSkippedListener(
 }
 
 // ── Storage and MediaStore APIs ────────────────────────────────────────────
+
+export function checkFolderPhysicallyExists(): boolean {
+  return EntePhotoCameraModule?.checkFolderPhysicallyExists?.() ?? false;
+}
+
+export function tryDirectMkdirs(): 'already_exists' | 'created' | 'failed' {
+  return EntePhotoCameraModule?.tryDirectMkdirs?.() ?? 'failed';
+}
+
+export function createSubdirectoryWithTreeUri(
+  treeUriString: string,
+  subDirName: string,
+): SubdirectorySafResult {
+  return (
+    EntePhotoCameraModule?.createSubdirectoryWithTreeUri?.(treeUriString, subDirName) ?? {
+      success: false,
+      alreadyExists: false,
+      error: 'Module unavailable',
+    }
+  );
+}
+
+export function getPersistedUriPermissions(): string[] {
+  return EntePhotoCameraModule?.getPersistedUriPermissions?.() ?? [];
+}
+
+export function releasePersistedUriPermission(uriString: string): boolean {
+  return EntePhotoCameraModule?.releasePersistedUriPermission?.(uriString) ?? false;
+}
 
 export async function ensureStorageReady(): Promise<StorageReadyResult> {
   return (
@@ -248,6 +279,8 @@ export {
   PhotoSkippedEvent,
   StoredPhotoResult,
   StorageReadyResult,
+  SubdirectorySafResult,
+  DirectMkdirResult,
 };
 
 export default EntePhotoCameraModule;

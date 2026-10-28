@@ -5,6 +5,7 @@ const REFRESH_TOKEN_KEY = 'entephoto_refresh_token';
 const USER_KEY = 'entephoto_user_data';
 const FAVORITES_KEY = 'entephoto_favorite_photo_ids_v1';
 const THEME_KEY = 'entephoto_theme_preference_v1';
+const DCIM_SAF_URI_KEY = 'entephoto_dcim_saf_tree_uri_v1';
 
 export const storageService = {
   async getSessionToken(): Promise<string | null> {
@@ -123,6 +124,33 @@ export const storageService = {
       await SecureStore.setItemAsync(FAVORITES_KEY, JSON.stringify(ids));
     } catch (error) {
       console.error('[storageService] Failed to save favorite photo IDs:', error);
+    }
+  },
+
+  async getPersistedDcimSafUri(): Promise<string | null> {
+    try {
+      return await SecureStore.getItemAsync(DCIM_SAF_URI_KEY);
+    } catch (error) {
+      console.error('[storageService] Failed to get persisted DCIM SAF URI:', error);
+      return null;
+    }
+  },
+
+  async setPersistedDcimSafUri(uri: string): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(DCIM_SAF_URI_KEY, uri);
+      console.log('[storageService] Persisted DCIM SAF URI successfully');
+    } catch (error) {
+      console.error('[storageService] Failed to persist DCIM SAF URI:', error);
+    }
+  },
+
+  async removePersistedDcimSafUri(): Promise<void> {
+    try {
+      await SecureStore.deleteItemAsync(DCIM_SAF_URI_KEY);
+      console.log('[storageService] Removed persisted DCIM SAF URI');
+    } catch (error) {
+      console.error('[storageService] Failed to remove persisted DCIM SAF URI:', error);
     }
   },
 

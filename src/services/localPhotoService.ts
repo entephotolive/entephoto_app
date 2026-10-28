@@ -1,14 +1,20 @@
-import { Platform } from 'react-native';
+import { Platform, Alert } from 'react-native';
 import { Directory, File, type WatchEvent, type WatchSubscription } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import { storageService } from '@/services/storageService';
 import {
   addPhotoSavedListener,
-  ensureStorageReady,
   queryStoredPhotos,
   deleteStoredPhoto,
+  checkFolderPhysicallyExists,
+  tryDirectMkdirs,
+  createSubdirectoryWithTreeUri,
 } from 'entephoto-camera';
 import { GalleryPhotoItem } from '@/screens/Gallery/PhotoSelectionGalleryScreen';
 import { PHOTO_STORAGE_DIR_URI, PHOTO_STORAGE_DISPLAY_PATH } from '@/config/photo.config';
 import { permissionCoordinator } from './permissionCoordinator';
+
+const { StorageAccessFramework } = FileSystem;
 
 // ── Canonical Photo Directory on Android (synced with env) ────────────────────
 export const CANONICAL_DCIM_DIR_URI = PHOTO_STORAGE_DIR_URI;
@@ -60,82 +66,340 @@ const RAW_EXTENSIONS = [
   '.pef',
 ];
 
-let directoryInitPromise: Promise<boolean> | null = null;
-
 /**
  * Ensures the canonical DCIM/Entephoto directory exists on the device.
  * Idempotent: checks existence before creating, safe to call repeatedly.
  * Returns true if the directory exists or was created successfully.
  */
-export async function ensurePhotoDirectoryExists(silent: boolean = false): Promise<boolean> {
-  if (directoryInitPromise) {
-    return directoryInitPromise;
+
+export type FolderInitStatus = 'already_exists' | 'created' | 'permission_required' | 'failed';
+
+export interface FolderInitResult {
+  status: FolderInitStatus;
+  apiLevel: number;
+  method: 'direct_fs' | 'saf' | 'already_present' | 'none';
+  folderPath: string;
+  verifiedPhysical: boolean;
+  safUri?: string;
+  error?: string;
+}
+
+export function isDcimDirectorySafUri(uri: string): boolean {
+  if (!uri) return false;
+  try {
+    const decoded = decodeURIComponent(uri);
+    const m = decoded.match(/\/tree\/([^/]+)/);
+    if (!m || !m[1]) return false;
+    const documentId = m[1];
+    const colonIdx = documentId.indexOf(':');
+    if (colonIdx === -1) return false;
+    const pathAfterColon = documentId.substring(colonIdx + 1).replace(/\/$/, '');
+    return pathAfterColon.toUpperCase() === 'DCIM';
+  } catch {
+    return false;
+  }
+}
+
+export function getSelectedFolderNameFromSafUri(uri: string): string {
+  try {
+    const decoded = decodeURIComponent(uri);
+    const m = decoded.match(/\/tree\/([^/]+)/);
+    if (!m || !m[1]) return 'Unknown';
+    const documentId = m[1];
+    const colonIdx = documentId.indexOf(':');
+    if (colonIdx === -1) return documentId;
+    const pathAfterColon = documentId.substring(colonIdx + 1).replace(/\/$/, '');
+    return pathAfterColon || 'Storage Root';
+  } catch {
+    return 'Unknown';
+  }
+}
+
+let inFlightFolderInitPromise: Promise<FolderInitResult> | null = null;
+
+/**
+ * Initializes the physical DCIM/Entephoto directory on device storage.
+ * Idempotent, safe on app startup and repeated foreground/resume events.
+ */
+export async function initializeEntePhotoFolder(options?: {
+  interactive?: boolean;
+  force?: boolean;
+}): Promise<FolderInitResult> {
+  const interactive = options?.interactive ?? false;
+  const force = options?.force ?? false;
+
+  if (inFlightFolderInitPromise && !force) {
+    return inFlightFolderInitPromise;
   }
 
-  directoryInitPromise = (async () => {
+  inFlightFolderInitPromise = (async (): Promise<FolderInitResult> => {
     if (Platform.OS !== 'android') {
-      return true;
+      return {
+        status: 'already_exists',
+        apiLevel: 0,
+        method: 'already_present',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: true,
+      };
     }
 
-    try {
-      const hasPermission = silent
-        ? await checkStoragePermission()
-        : await requestStoragePermission();
+    const apiLevel =
+      typeof Platform.Version === 'number'
+        ? Platform.Version
+        : parseInt(String(Platform.Version), 10) || 0;
 
-      if (!hasPermission) {
-        if (!silent) {
-          console.warn(
-            `[LocalPhotoService] Storage permission denied. Cannot initialize ${PHOTO_STORAGE_DISPLAY_PATH} directory.`,
-          );
-        }
-        return false;
-      }
-
-      const apiLevel =
-        typeof Platform.Version === 'number'
-          ? Platform.Version
-          : parseInt(String(Platform.Version), 10);
-
-      // On Android 10+ (API 29+), Scoped Storage disallows raw POSIX mkdir / Directory.create()
-      // on public shared DCIM without SAF. Attempting dir.create() throws "Missing 'WRITE' permission".
-      // Under Scoped Storage, photos are written via MediaStore, which creates the directory dynamically.
-      if (apiLevel >= 29) {
-        const readiness = await ensureStorageReady();
-        if (!silent) {
-          console.log(
-            `[LocalPhotoService] Scoped storage ready for ${PHOTO_STORAGE_DISPLAY_PATH} (API ${apiLevel}):`,
-            readiness,
-          );
-        }
-        return readiness.ready;
-      }
-
-      // Android 9 and below (API <= 28): Direct filesystem creation is permitted
-      const dir = new Directory(CANONICAL_DCIM_DIR_URI);
-      if (!dir.exists) {
-        dir.create({ intermediates: true });
-        console.log(`[LocalPhotoService] Created canonical directory: ${CANONICAL_DCIM_DIR_URI}`);
-      }
-      return true;
-    } catch (error) {
-      console.error(
-        `[LocalPhotoService] Failed to ensure canonical directory exists at ${CANONICAL_DCIM_DIR_URI}:`,
-        error,
+    // 1. Check if the folder already physically exists on disk
+    const alreadyPhysical = checkFolderPhysicallyExists();
+    if (alreadyPhysical) {
+      console.log(
+        `[LocalPhotoService] Verified physical folder already exists at ${PHOTO_STORAGE_DISPLAY_PATH} (API ${apiLevel})`,
       );
-      return false;
+      return {
+        status: 'already_exists',
+        apiLevel,
+        method: 'already_present',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: true,
+      };
+    }
+
+    // 2. Try direct filesystem creation first
+    const directResult = tryDirectMkdirs();
+    if (directResult === 'already_exists') {
+      return {
+        status: 'already_exists',
+        apiLevel,
+        method: 'already_present',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: true,
+      };
+    }
+
+    if (directResult === 'created') {
+      const verified = checkFolderPhysicallyExists();
+      if (verified) {
+        console.log(
+          `[LocalPhotoService] Successfully created physical folder via direct mkdirs: ${PHOTO_STORAGE_DISPLAY_PATH} (API ${apiLevel})`,
+        );
+        return {
+          status: 'created',
+          apiLevel,
+          method: 'direct_fs',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: true,
+        };
+      }
+    }
+
+    // 3. For Android 9 and below (API <= 28): check permissions if direct mkdir failed
+    if (apiLevel <= 28) {
+      const hasPerm = interactive
+        ? await requestStoragePermission()
+        : await checkStoragePermission();
+      if (!hasPerm) {
+        return {
+          status: 'permission_required',
+          apiLevel,
+          method: 'none',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: false,
+          error: 'Storage permission required on Android <= 28',
+        };
+      }
+      const retryDirect = tryDirectMkdirs();
+      const verified = checkFolderPhysicallyExists();
+      if (retryDirect === 'created' || verified) {
+        return {
+          status: 'created',
+          apiLevel,
+          method: 'direct_fs',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: true,
+        };
+      }
+      return {
+        status: 'failed',
+        apiLevel,
+        method: 'direct_fs',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: false,
+        error: 'Failed to create directory on legacy external storage',
+      };
+    }
+
+    // 4. Android 10+ (API 29+ / API 34): Use Storage Access Framework (SAF)
+    // Check if we already have an existing persisted DCIM SAF URI in secure storage
+    const savedSafUri = await storageService.getPersistedDcimSafUri();
+    if (savedSafUri && isDcimDirectorySafUri(savedSafUri)) {
+      try {
+        console.log(
+          `[LocalPhotoService] Attempting folder creation via persisted SAF URI (API ${apiLevel})`,
+        );
+        let safRes = createSubdirectoryWithTreeUri(savedSafUri, 'Entephoto');
+        if (!safRes.success) {
+          const existingFiles = await StorageAccessFramework.readDirectoryAsync(savedSafUri);
+          const hasEntephoto = existingFiles.some(f => {
+            const dec = decodeURIComponent(f).toLowerCase();
+            return (
+              dec.endsWith('/entephoto') ||
+              dec.includes('dcim%2fentephoto') ||
+              dec.includes('dcim/entephoto')
+            );
+          });
+          if (!hasEntephoto) {
+            await StorageAccessFramework.makeDirectoryAsync(savedSafUri, 'Entephoto');
+          }
+          safRes = { success: true, alreadyExists: hasEntephoto };
+        }
+
+        const verified = checkFolderPhysicallyExists();
+        console.log(
+          `[LocalPhotoService] Persisted SAF result: success=${safRes.success}, verifiedPhysical=${verified}`,
+        );
+        return {
+          status: safRes.alreadyExists ? 'already_exists' : 'created',
+          apiLevel,
+          method: 'saf',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: verified,
+          safUri: savedSafUri,
+        };
+      } catch (err: any) {
+        console.warn(
+          `[LocalPhotoService] Persisted SAF URI was invalid or revoked. Clearing it. Error:`,
+          err?.message || err,
+        );
+        await storageService.removePersistedDcimSafUri();
+      }
+    }
+
+    // 5. No valid persisted SAF URI exists.
+    if (!interactive) {
+      console.log(
+        `[LocalPhotoService] One-time SAF directory setup required for ${PHOTO_STORAGE_DISPLAY_PATH} (API ${apiLevel})`,
+      );
+      return {
+        status: 'permission_required',
+        apiLevel,
+        method: 'none',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: false,
+        error: 'One-time DCIM directory permission required',
+      };
+    }
+
+    // 6. Interactive SAF directory setup flow
+    try {
+      console.log(`[LocalPhotoService] Launching SAF directory picker for DCIM (API ${apiLevel})`);
+      const initialUri = StorageAccessFramework.getUriForDirectoryInRoot('DCIM');
+      const permResult = await StorageAccessFramework.requestDirectoryPermissionsAsync(initialUri);
+
+      if (!permResult.granted || !permResult.directoryUri) {
+        console.log('[LocalPhotoService] User cancelled directory picker');
+        return {
+          status: 'permission_required',
+          apiLevel,
+          method: 'none',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: false,
+          error: 'User cancelled folder selection',
+        };
+      }
+
+      // Validate that user selected the DCIM folder
+      if (!isDcimDirectorySafUri(permResult.directoryUri)) {
+        const selectedName = getSelectedFolderNameFromSafUri(permResult.directoryUri);
+        console.warn(
+          `[LocalPhotoService] User selected wrong directory: "${selectedName}" (expected DCIM)`,
+        );
+        Alert.alert(
+          'Incorrect Folder Selected',
+          `Please select the "DCIM" folder. You selected: "${selectedName}".`,
+          [{ text: 'OK' }],
+        );
+        return {
+          status: 'failed',
+          apiLevel,
+          method: 'saf',
+          folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+          verifiedPhysical: false,
+          error: `Selected "${selectedName}" instead of "DCIM"`,
+        };
+      }
+
+      // Save validated DCIM SAF URI
+      await storageService.setPersistedDcimSafUri(permResult.directoryUri);
+
+      // Create child directory Entephoto
+      let safRes = createSubdirectoryWithTreeUri(permResult.directoryUri, 'Entephoto');
+      if (!safRes.success) {
+        try {
+          const existingFiles = await StorageAccessFramework.readDirectoryAsync(
+            permResult.directoryUri,
+          );
+          const hasEntephoto = existingFiles.some(f => {
+            const dec = decodeURIComponent(f).toLowerCase();
+            return (
+              dec.endsWith('/entephoto') ||
+              dec.includes('dcim%2fentephoto') ||
+              dec.includes('dcim/entephoto')
+            );
+          });
+          if (!hasEntephoto) {
+            await StorageAccessFramework.makeDirectoryAsync(permResult.directoryUri, 'Entephoto');
+          }
+          safRes = { success: true, alreadyExists: hasEntephoto };
+        } catch (e: any) {
+          safRes = { success: false, alreadyExists: false, error: e?.message || String(e) };
+        }
+      }
+
+      const verified = checkFolderPhysicallyExists();
+      console.log(
+        `[LocalPhotoService] Initial SAF setup complete: status=${
+          safRes.alreadyExists ? 'already_exists' : 'created'
+        }, verifiedPhysical=${verified}`,
+      );
+
+      return {
+        status: safRes.alreadyExists ? 'already_exists' : 'created',
+        apiLevel,
+        method: 'saf',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: verified,
+        safUri: permResult.directoryUri,
+      };
+    } catch (safErr: any) {
+      console.error('[LocalPhotoService] SAF directory picker error:', safErr);
+      return {
+        status: 'failed',
+        apiLevel,
+        method: 'saf',
+        folderPath: PHOTO_STORAGE_DISPLAY_PATH,
+        verifiedPhysical: false,
+        error: safErr?.message || 'Failed during SAF directory setup',
+      };
     }
   })();
 
-  const success = await directoryInitPromise;
-  if (!success) {
-    // Reset so subsequent attempts (e.g. after user grants permission or retries) can re-run
-    directoryInitPromise = null;
+  try {
+    return await inFlightFolderInitPromise;
+  } finally {
+    inFlightFolderInitPromise = null;
   }
-  return success;
+}
+
+/**
+ * Backward-compatible helper that delegates to initializeEntePhotoFolder.
+ * Returns true if the directory exists or was created successfully.
+ */
+export async function ensurePhotoDirectoryExists(silent: boolean = false): Promise<boolean> {
+  const result = await initializeEntePhotoFolder({ interactive: !silent });
+  return result.status === 'already_exists' || result.status === 'created';
 }
 
 export function resetDirectoryInitPromise(): void {
-  directoryInitPromise = null;
+  inFlightFolderInitPromise = null;
 }
 
 /**

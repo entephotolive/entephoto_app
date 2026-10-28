@@ -6,6 +6,7 @@ import {
   generateQrPngBytes,
   uint8ArrayToBase64,
   extractEventId,
+  getEventInitials,
 } from '../utils/eventQr';
 
 export interface QrExportResult {
@@ -34,11 +35,14 @@ export const qrExportService = {
       // 1. Generate live event URL using Step 1 utility
       const qrUrl = generateEventLiveQrUrl(event);
 
-      // 2. Generate crisp high-resolution PNG bytes (scale 20 -> ~820x820px, 4 modules quiet zone)
-      const pngBytes = generateQrPngBytes(qrUrl, 20, 4);
+      // 2. Extract dynamic event initials for the centre badge
+      const initials = getEventInitials(event.title);
+
+      // 3. Generate crisp high-resolution PNG bytes with modern redesign (scale 20 -> ~1140x1140px, 4 quiet zone, initials)
+      const pngBytes = generateQrPngBytes(qrUrl, 20, 4, initials);
       const base64Data = uint8ArrayToBase64(pngBytes);
 
-      // 3. Write to temporary cache directory
+      // 4. Write to temporary cache directory
       const sanitizedTitle = (event.title || 'Event').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
       const filename = `EntePhoto_QR_${sanitizedTitle}_${eventId.slice(-6)}.png`;
       const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
@@ -54,7 +58,7 @@ export const qrExportService = {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      // 4. Request write permission for Media Library
+      // 5. Request write permission for Media Library
       const permResponse = await requestPermissionsAsync(true);
       if (!permResponse.granted && permResponse.status !== 'granted') {
         // Clean up temp file
@@ -68,7 +72,7 @@ export const qrExportService = {
         };
       }
 
-      // 5. Save to Media Library (Gallery) using Expo SDK 57 Asset API with legacy fallback
+      // 6. Save to Media Library (Gallery) using Expo SDK 57 Asset API with legacy fallback
       let assetId = '';
       try {
         const asset = await Asset.create(tempUri);
@@ -80,7 +84,7 @@ export const qrExportService = {
         assetId = asset.id;
       }
 
-      // 6. Clean up temp file
+      // 7. Clean up temp file
       try {
         await FileSystem.deleteAsync(tempUri, { idempotent: true });
       } catch {}
