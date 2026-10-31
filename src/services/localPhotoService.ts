@@ -1,11 +1,12 @@
 import { Platform, Alert } from 'react-native';
 import { Directory, File, type WatchEvent, type WatchSubscription } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
+import { Asset } from 'expo-media-library';
 import { storageService } from '@/services/storageService';
 import {
   addPhotoSavedListener,
   queryStoredPhotos,
-  deleteStoredPhoto,
+  purgeDownloadedRecord,
   checkFolderPhysicallyExists,
   tryDirectMkdirs,
   createSubdirectoryWithTreeUri,
@@ -1051,36 +1052,232 @@ export function subscribeToDcimPhotos(
   };
 }
 
-/**
- * Deletes a local photo file from disk if it exists.
- */
-export async function deleteLocalPhoto(fileUri: string): Promise<boolean> {
-  try {
-    const filename = fileUri.split('/').pop() || '';
-    const photoId = `dcim-${filename}`;
+export interface DeletePhotoResult {
+  success: boolean;
+  cancelled?: boolean;
+  error?: string;
+}
 
-    if (Platform.OS === 'android') {
-      const deleted = await deleteStoredPhoto(fileUri);
-      if (deleted) {
-        console.log(`[LocalPhotoService] Successfully deleted via native MediaStore: ${fileUri}`);
+export interface BatchDeleteResult {
+  successIds: Set<string>;
+  successUris: Set<string>;
+  failCount: number;
+  cancelled: boolean;
+}
+
+/**
+ * Deletes a local photo file from disk/MediaStore if it exists.
+ * Routes content:// URIs through expo-media-library Asset.delete() on Android 11+
+ * and file:// URIs through expo-file-system File.delete().
+ * Never invokes File.delete() on a content:// URI.
+ */
+export async function deleteLocalPhoto(
+  target: GalleryPhotoItem | string,
+): Promise<DeletePhotoResult> {
+  const uri = typeof target === 'string' ? target : target.uri;
+  const filename =
+    typeof target === 'string'
+      ? target.split('/').pop() || ''
+      : target.filename || target.uri.split('/').pop() || '';
+  const photoId =
+    typeof target === 'string'
+      ? target.startsWith('dcim-')
+        ? target
+        : `dcim-${filename}`
+      : target.id;
+
+  try {
+    // 1. Content URIs (Android MediaStore / iOS PHAsset)
+    if (uri.startsWith('content://') || (!uri.startsWith('file://') && !uri.startsWith('/'))) {
+      try {
+        const asset = new Asset(uri);
+        await asset.delete();
+        console.log(`[LocalPhotoService] Successfully deleted via expo-media-library: ${uri}`);
         cachedPhotosMap.delete(photoId);
-        cachedPhotosMap.delete(fileUri);
-        return true;
+        cachedPhotosMap.delete(uri);
+        if (filename) {
+          purgeDownloadedRecord(filename);
+        }
+        return { success: true };
+      } catch (assetErr: any) {
+        const errMsg = assetErr?.message || String(assetErr);
+        const isCancelled =
+          errMsg.includes('User did not grant') ||
+          errMsg.includes('PermissionsException') ||
+          errMsg.includes('grant write permissions');
+
+        if (isCancelled) {
+          console.log(`[LocalPhotoService] Deletion cancelled by user for: ${uri}`);
+          return { success: false, cancelled: true };
+        }
+
+        if (
+          errMsg.toLowerCase().includes('not found') ||
+          errMsg.toLowerCase().includes('does not exist')
+        ) {
+          console.warn(`[LocalPhotoService] MediaStore asset already absent: ${uri}`);
+          cachedPhotosMap.delete(photoId);
+          cachedPhotosMap.delete(uri);
+          if (filename) {
+            purgeDownloadedRecord(filename);
+          }
+          return { success: true };
+        }
+
+        console.error(`[LocalPhotoService] MediaLibrary Asset.delete failed for ${uri}:`, assetErr);
+        return { success: false, error: errMsg };
       }
     }
 
-    const file = new File(fileUri);
-    if (file.exists) {
-      file.delete();
-      console.log(`[LocalPhotoService] Successfully deleted file: ${fileUri}`);
+    // 2. File / filesystem path URIs
+    if (uri.startsWith('file://') || uri.startsWith('/')) {
+      const file = new File(uri);
+      if (file.exists) {
+        file.delete();
+        console.log(`[LocalPhotoService] Successfully deleted file: ${uri}`);
+      }
       cachedPhotosMap.delete(photoId);
-      cachedPhotosMap.delete(fileUri);
-      return true;
+      cachedPhotosMap.delete(uri);
+      if (filename) {
+        purgeDownloadedRecord(filename);
+      }
+      return { success: true };
     }
-    console.warn(`[LocalPhotoService] File not found for deletion: ${fileUri}`);
-    return false;
-  } catch (error) {
-    console.error(`[LocalPhotoService] Failed to delete file ${fileUri}:`, error);
-    return false;
+
+    console.warn(`[LocalPhotoService] Unrecognized URI scheme for deletion: ${uri}`);
+    return { success: false, error: `Unrecognized URI scheme: ${uri}` };
+  } catch (error: any) {
+    console.error(`[LocalPhotoService] Failed to delete photo ${uri}:`, error);
+    return { success: false, error: error?.message || String(error) };
   }
+}
+
+/**
+ * Deletes multiple local photos in a single batch operation.
+ * Passes all content:// URIs to expo-media-library's Asset.delete(assets)
+ * so Android 11+ presents a single system confirmation dialog rather than prompting per photo.
+ */
+export async function deleteLocalPhotos(
+  targets: (GalleryPhotoItem | string)[],
+): Promise<BatchDeleteResult> {
+  const successIds = new Set<string>();
+  const successUris = new Set<string>();
+  let failCount = 0;
+
+  if (!targets || targets.length === 0) {
+    return { successIds, successUris, failCount: 0, cancelled: false };
+  }
+
+  const mediaItems: { id: string; uri: string; filename: string; asset: Asset }[] = [];
+  const fileItems: { id: string; uri: string; filename: string }[] = [];
+
+  for (const target of targets) {
+    const uri = typeof target === 'string' ? target : target.uri;
+    const filename =
+      typeof target === 'string'
+        ? target.split('/').pop() || ''
+        : target.filename || target.uri.split('/').pop() || '';
+    const id =
+      typeof target === 'string'
+        ? target.startsWith('dcim-')
+          ? target
+          : `dcim-${filename}`
+        : target.id;
+
+    if (uri.startsWith('content://') || (!uri.startsWith('file://') && !uri.startsWith('/'))) {
+      mediaItems.push({ id, uri, filename, asset: new Asset(uri) });
+    } else {
+      fileItems.push({ id, uri, filename });
+    }
+  }
+
+  // 1. Batch delete content URIs via expo-media-library
+  if (mediaItems.length > 0) {
+    try {
+      const assets = mediaItems.map(m => m.asset);
+      await Asset.delete(assets);
+      for (const item of mediaItems) {
+        successIds.add(item.id);
+        successUris.add(item.uri);
+        cachedPhotosMap.delete(item.id);
+        cachedPhotosMap.delete(item.uri);
+        if (item.filename) {
+          purgeDownloadedRecord(item.filename);
+        }
+      }
+      console.log(
+        `[LocalPhotoService] Successfully batch-deleted ${mediaItems.length} photos via expo-media-library`,
+      );
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      const isCancelled =
+        errMsg.includes('User did not grant') ||
+        errMsg.includes('PermissionsException') ||
+        errMsg.includes('grant write permissions');
+
+      if (isCancelled) {
+        console.log('[LocalPhotoService] Batch deletion cancelled by user in OS dialog');
+        return { successIds, successUris, failCount: targets.length, cancelled: true };
+      }
+
+      console.warn(
+        '[LocalPhotoService] Batch Asset.delete failed, falling back to individual deletes:',
+        err,
+      );
+      for (const item of mediaItems) {
+        try {
+          await item.asset.delete();
+          successIds.add(item.id);
+          successUris.add(item.uri);
+          cachedPhotosMap.delete(item.id);
+          cachedPhotosMap.delete(item.uri);
+          if (item.filename) {
+            purgeDownloadedRecord(item.filename);
+          }
+        } catch (indErr: any) {
+          const indMsg = indErr?.message || String(indErr);
+          if (
+            indMsg.toLowerCase().includes('not found') ||
+            indMsg.toLowerCase().includes('does not exist')
+          ) {
+            successIds.add(item.id);
+            successUris.add(item.uri);
+            cachedPhotosMap.delete(item.id);
+            cachedPhotosMap.delete(item.uri);
+            if (item.filename) {
+              purgeDownloadedRecord(item.filename);
+            }
+          } else {
+            console.error(
+              `[LocalPhotoService] Failed to delete individual asset ${item.uri}:`,
+              indErr,
+            );
+            failCount++;
+          }
+        }
+      }
+    }
+  }
+
+  // 2. File items (if any)
+  for (const item of fileItems) {
+    try {
+      const file = new File(item.uri);
+      if (file.exists) {
+        file.delete();
+      }
+      successIds.add(item.id);
+      successUris.add(item.uri);
+      cachedPhotosMap.delete(item.id);
+      cachedPhotosMap.delete(item.uri);
+      if (item.filename) {
+        purgeDownloadedRecord(item.filename);
+      }
+    } catch (fileErr) {
+      console.error(`[LocalPhotoService] Failed to delete file ${item.uri}:`, fileErr);
+      failCount++;
+    }
+  }
+
+  return { successIds, successUris, failCount, cancelled: false };
 }

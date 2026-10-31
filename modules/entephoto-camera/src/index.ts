@@ -149,6 +149,10 @@ export async function queryStoredPhotos(relativeDir?: string | null): Promise<St
   return EntePhotoCameraModule?.queryStoredPhotos?.(relativeDir ?? null) ?? [];
 }
 
+export function purgeDownloadedRecord(filename: string): boolean {
+  return EntePhotoCameraModule?.purgeDownloadedRecord?.(filename) ?? false;
+}
+
 export async function deleteStoredPhoto(uriString: string): Promise<boolean> {
   return EntePhotoCameraModule?.deleteStoredPhoto?.(uriString) ?? false;
 }

@@ -3,7 +3,9 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "entephoto-camera": ["./modules/entephoto-camera/src/index.ts"],
+      "entephoto-camera/*": ["./modules/entephoto-camera/src/*"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", "nativewind-env.d.ts"],

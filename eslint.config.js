@@ -22,4 +22,14 @@ module.exports = defineConfig([
   {
     ignores: ['dist/*', '.expo/*', 'node_modules/*', 'public/*'],
   },
+  {
+    rules: {
+      'import/no-unresolved': [
+        'error',
+        {
+          ignore: ['^entephoto-camera$'],
+        },
+      ],
+    },
+  },
 ]);

@@ -138,6 +138,7 @@ declare class EntePhotoCameraModule extends NativeModule<CameraEvents> {
   ensureStorageReady(): Promise<StorageReadyResult>;
   queryStoredPhotos(relativeDir?: string | null): Promise<StoredPhotoResult[]>;
   deleteStoredPhoto(uriString: string): Promise<boolean>;
+  purgeDownloadedRecord(filename: string): boolean;
 
   getStatus(): string;
   getConnectionState(): ConnectionState;

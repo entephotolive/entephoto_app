@@ -178,7 +178,7 @@ export interface FullScreenPhotoViewerProps {
   favoritePhotoIds: Set<string>;
   uploadedPhotoIds?: Set<string>;
   onUploadPhoto: (photo: GalleryPhotoItem) => void;
-  onDeletePhoto: (photo: GalleryPhotoItem) => void;
+  onDeletePhoto: (photo: GalleryPhotoItem) => Promise<boolean | any> | void;
   isDark?: boolean;
   /** True while a gallery-level upload is active for the current photo */
   isUploading?: boolean;
@@ -801,8 +801,11 @@ export const FullScreenPhotoViewer: React.FC<FullScreenPhotoViewerProps> = ({
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => {
-            onDeletePhoto(currentPhoto);
+          onPress: async () => {
+            const res = await onDeletePhoto(currentPhoto);
+            if (res === false) {
+              return;
+            }
             if (photos.length <= 1) {
               onClose();
             } else if (currentIndex >= photos.length - 1) {

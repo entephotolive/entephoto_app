@@ -11,6 +11,7 @@ module.exports = function (api) {
           root: [path.resolve(__dirname)],
           alias: {
             '@': path.resolve(__dirname, 'src'),
+            'entephoto-camera': path.resolve(__dirname, 'modules/entephoto-camera/src'),
           },
           extensions: ['.ios.js', '.android.js', '.js', '.ts', '.tsx', '.json'],
         },

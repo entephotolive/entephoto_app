@@ -44,6 +44,7 @@ import {
   scanDcimEntephotoPhotos,
   subscribeToDcimPhotos,
   deleteLocalPhoto,
+  deleteLocalPhotos,
   PHOTO_STORAGE_DISPLAY_PATH,
   addPhotoScanListener,
   isPhotoScanInProgress,
@@ -1304,45 +1305,37 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
           onPress: async () => {
             setIsActionsModalVisible(false);
 
-            const successIds = new Set<string>();
-            const successUris = new Set<string>();
-            let failCount = 0;
+            const result = await deleteLocalPhotos(selectedPhotos);
 
-            // Delete files from storage
-            await Promise.all(
-              selectedPhotos.map(async photo => {
-                try {
-                  await deleteLocalPhoto(photo.uri);
-                  successIds.add(photo.id);
-                  successUris.add(photo.uri);
-                } catch (e) {
-                  console.error('[GalleryActions] Failed to delete photo file:', photo.uri, e);
-                  failCount++;
-                }
-              }),
-            );
+            if (result.cancelled) {
+              return;
+            }
 
-            // Clear ONLY successful deleted IDs from selection and favorite sets
-            setSelectedPhotoIds(prev => {
-              const next = new Set(prev);
-              successIds.forEach(id => next.delete(id));
-              return next;
-            });
-            setFavoritePhotoIds(prev => {
-              const next = new Set(prev);
-              successIds.forEach(id => next.delete(id));
-              return next;
-            });
+            const { successIds, successUris, failCount } = result;
 
-            // Update state ONLY for successful deletions
-            setPhotos(prev => prev.filter(p => !successIds.has(p.id) && !successUris.has(p.uri)));
+            if (successIds.size > 0) {
+              // Clear ONLY successful deleted IDs from selection and favorite sets
+              setSelectedPhotoIds(prev => {
+                const next = new Set(prev);
+                successIds.forEach(id => next.delete(id));
+                return next;
+              });
+              setFavoritePhotoIds(prev => {
+                const next = new Set(prev);
+                successIds.forEach(id => next.delete(id));
+                return next;
+              });
 
-            if (failCount === 0) {
+              // Update state ONLY for successful deletions
+              setPhotos(prev => prev.filter(p => !successIds.has(p.id) && !successUris.has(p.uri)));
+            }
+
+            if (failCount === 0 && successIds.size > 0) {
               Alert.alert(
                 'Photos Deleted 🗑️',
                 `Successfully deleted ${successIds.size} photo${successIds.size > 1 ? 's' : ''} from local storage.`,
               );
-            } else {
+            } else if (failCount > 0) {
               Alert.alert(
                 'Partial Deletion',
                 `Successfully deleted ${successIds.size} photo${successIds.size !== 1 ? 's' : ''}, but ${failCount} failed to delete and remain selected.`,
@@ -2022,9 +2015,26 @@ export const PhotoSelectionGalleryScreen: React.FC = () => {
   }, [handleUploadPhotos]);
 
   // Delete Single Photo
-  const handleDeletePhoto = useCallback(async (photo: GalleryPhotoItem) => {
-    await deleteLocalPhoto(photo.uri);
-    setPhotos(prev => prev.filter(p => p.id !== photo.id && p.uri !== photo.uri));
+  const handleDeletePhoto = useCallback(async (photo: GalleryPhotoItem): Promise<boolean> => {
+    const result = await deleteLocalPhoto(photo);
+    if (result.success) {
+      setPhotos(prev => prev.filter(p => p.id !== photo.id && p.uri !== photo.uri));
+      setSelectedPhotoIds(prev => {
+        const next = new Set(prev);
+        next.delete(photo.id);
+        return next;
+      });
+      setFavoritePhotoIds(prev => {
+        const next = new Set(prev);
+        next.delete(photo.id);
+        return next;
+      });
+      return true;
+    }
+    if (!result.cancelled) {
+      Alert.alert('Delete Failed', result.error || 'Failed to delete photo from storage.');
+    }
+    return false;
   }, []);
 
   // Upload Single Photo (Thin wrapper for the viewer)

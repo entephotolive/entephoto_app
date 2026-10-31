@@ -479,7 +479,7 @@ class EntePhotoCameraModule : Module() {
                 Timber.e(e, "EntePhotoCameraModule: failed to delete stored photo " + uriString)
             }
 
-            if (filename != null) {
+            if (deleted && filename != null) {
                 try {
                     val db = ImportDatabase.getInstance(ctx)
                     runBlocking {
@@ -491,6 +491,20 @@ class EntePhotoCameraModule : Module() {
             }
 
             deleted
+        }
+
+        Function("purgeDownloadedRecord") { filename: String ->
+            val ctx = appContext.reactContext ?: return@Function false
+            try {
+                val db = ImportDatabase.getInstance(ctx)
+                runBlocking {
+                    db.downloadedFileDao().deleteByFilename(filename)
+                }
+                true
+            } catch (e: Exception) {
+                Timber.w(e, "EntePhotoCameraModule: failed to purge Room record for " + filename)
+                false
+            }
         }
 
 
